@@ -6,10 +6,16 @@ const DIR = "../../";
 const GROUND_TRUTH = {
   "IMG_5816.jpeg": 31,
   "IMG_5817.jpeg": 34,
+  "IMG_5818.jpeg": 4,
+  "IMG_5819.jpeg": 15,
   "IMG_5825.jpeg": 22,
   "z7684272505382_c6246306bfd98e30b517ecf83e168fea.jpg": 45,
   "z7684272512641_ad8f1ab954706c9fb0c3f3323e4c9318.jpg": 27,
+  "z7684272609303_0427067caf3a7fc990dc1624d92df2da.jpg": 42,
   "z7684272634118_fd6cb398bd8149242fbd967023d2dd7a.jpg": 45,
+  "z7706421817056_b9ad273ea1c75c9f3af8df19961ce0b8.jpg": 36,
+  "z7706421874606_a5df4ab4329ae93b039b4253f6dabca9.jpg": 30,
+  "z7706425611275_f11dff944c8214b8296bb7997b00b70d.jpg": 40,
 };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

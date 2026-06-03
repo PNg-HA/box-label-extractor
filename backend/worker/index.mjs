@@ -87,13 +87,21 @@ function extractJson(text) {
   return JSON.parse(t.slice(start, end + 1));
 }
 
-function decideGrid(width, height) {
+function decideGrid(width, height, holeCount) {
+  // Base columns from width, but adapt to how many boxes are actually present (≈ holes).
+  // Forcing 3 columns on a close-up of a few large boxes slices a box in two and over-counts.
   let cols = Math.min(4, Math.max(1, Math.round(width / TILE_TARGET_PX)));
   const isPortrait = height >= width;
   if (isPortrait && width >= 1400 && cols < 3) cols = 3;
-  // Columns only. Horizontal cuts drop labels that sit on the cut line (each half
-  // sees them as "clipped" and skips them), which under-counts — verified empirically.
-  const rows = 1;
+
+  if (typeof holeCount === "number") {
+    // few boxes -> don't over-split. Keep ~>=4 boxes per column as a rough floor.
+    if (holeCount <= 6) cols = 1;
+    else if (holeCount <= 12) cols = Math.min(cols, 2);
+    // also never use more columns than there are boxes
+    cols = Math.max(1, Math.min(cols, Math.floor(holeCount / 3) || 1));
+  }
+  const rows = 1; // horizontal cuts drop labels sitting on the cut line — verified empirically
   return { cols, rows };
 }
 
@@ -113,25 +121,33 @@ async function buildTiles(buffer) {
   const meta = await sharp(oriented).metadata();
   const W = meta.width || 0;
   const H = meta.height || 0;
-  const { cols, rows } = decideGrid(W, H);
 
-  // Column boundaries: prefer cuts derived from where the round holes cluster (the true
-  // column centres), because boxes are often shifted/staggered and a blind 1/N cut can slice
-  // through a box row — making a tile capture two stacks (double counting). Fall back to even
-  // thirds when the hole signal is too weak to trust.
-  let boundaries = null; // array of x cut fractions, length cols-1
-  let cutSource = "even";
-  if (rows <= 1 && cols >= 2) {
-    try {
-      const det = await detectHoles(oriented);
-      const cuts = det ? columnCutsFromHoles(det.xs, cols) : null;
-      if (cuts && cuts.length === cols - 1) { boundaries = cuts; cutSource = "holes"; }
-    } catch (_) { /* fall back to even */ }
+  // Detect holes once: used both to decide how many columns (box density) and where to cut.
+  let det = null;
+  try { det = await detectHoles(oriented); } catch (_) { det = null; }
+  const holeCount = det ? det.holes : undefined;
+
+  let { cols, rows } = decideGrid(W, H, holeCount);
+
+  // Column boundaries: only split when the holes form CONFIDENT, well-separated vertical
+  // clusters (a real multi-column pallet). If clustering is weak/messy (close-ups, odd
+  // layouts, too few holes), fall back to a SINGLE tile so the model sees the whole image —
+  // splitting those would slice boxes and over/under-count.
+  let boundaries = null;
+  let cutSource = "single";
+  if (rows <= 1 && cols >= 2 && det) {
+    const cuts = columnCutsFromHoles(det.xs, cols);
+    if (cuts && cuts.length === cols - 1 && wellSeparated(det.xs, cuts)) {
+      boundaries = cuts; cutSource = "holes";
+    } else {
+      cols = 1; // not confident -> don't split
+    }
+  } else if (cols >= 2 && !det) {
+    cols = 1; // no hole signal at all -> safer not to split
   }
 
   const xEdges = [0];
   if (boundaries) for (const c of boundaries) xEdges.push(Math.round(c * W));
-  else for (let c = 1; c < cols; c++) xEdges.push(Math.round((c / cols) * W));
   xEdges.push(W);
 
   const tileH = Math.floor(H / rows);
@@ -146,6 +162,31 @@ async function buildTiles(buffer) {
     }
   }
   return { tiles, cols, rows, cutSource };
+}
+
+// Confident column split = each cut sits in a real GAP (few/no holes near it) and each
+// resulting column holds a healthy share of holes. Rejects messy/sparse hole patterns.
+function wellSeparated(xs, cuts) {
+  if (!xs || xs.length < 15) return false;         // need a real pallet's worth of holes
+  const bandsN = cuts.length + 1;
+  const edges = [0, ...cuts, 1];
+  const counts = new Array(bandsN).fill(0);
+  for (const x of xs) {
+    for (let b = 0; b < bandsN; b++) {
+      if (x >= edges[b] && x < edges[b + 1]) { counts[b]++; break; }
+    }
+  }
+  // every column must hold a healthy share AND an absolute minimum of holes (a real
+  // multi-column stack has many holes per column; a close-up of a few boxes does not).
+  const minShare = Math.max(4, Math.floor(xs.length * 0.2));
+  if (counts.some(c => c < minShare)) return false;
+  // each cut must sit in a gap: few holes within a small margin around it
+  const margin = 0.04;
+  for (const cut of cuts) {
+    const near = xs.filter(x => Math.abs(x - cut) < margin).length;
+    if (near > Math.max(1, xs.length * 0.06)) return false;
+  }
+  return true;
 }
 
 // Retry wrapper: under heavy parallelism Bedrock can throttle. Retry transient errors
