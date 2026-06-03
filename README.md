@@ -31,10 +31,10 @@ flowchart TD
     WK -->|ghi results/jobId.json| S3ST
 
     subgraph PIPE["Worker pipeline (mỗi ảnh)"]
-        P1["auto-orient EXIF"] --> P2["cắt cột (sharp) + normalize + sharpen"]
+        P1["auto-orient EXIF"] --> P2["phát hiện lỗ tròn → tìm tâm cột<br/>cắt cột theo ranh giới thật (sharp)<br/>+ normalize + sharpen"]
         P2 --> P3["mỗi cột: ENSEMBLE vote<br/>nhiều invoke SONG SONG"]
         P3 --> BR
-        P2 --> P4["hole-detector / cột<br/>(xử lý ảnh thuần)"]
+        P2 --> P4["đếm lỗ / cột<br/>(xử lý ảnh thuần)"]
         P3 --> P5["re-examine cột thiếu<br/>khi holes xác nhận cột đều"]
         P5 --> BR
         P4 --> P6["cross-check: cảnh báo lowConfidence"]
@@ -100,9 +100,11 @@ tự tiền xử lý + kết hợp nhiều tín hiệu phía mình:
    giới hạn 6MB của API Gateway/Lambda.
 2. **Auto-orient theo EXIF** — ảnh điện thoại thường orientation=6 (xoay 90°); không sửa
    thì cắt sai chiều (bug ngầm làm số dao động).
-3. **Cắt ảnh thành cột** (grid N×1, ~1500px/cột; ép 3 cột cho ảnh dọc ≥1400px) — mỗi cột
-   được Claude cấp trọn 1568px → tem to gấp ~3 lần. Cắt dọc KHÔNG chồng lấn (gap giữa cột
-   là khoảng trống, không rớt tem). Tiền xử lý: normalize + sharpen cho nét chữ.
+3. **Cắt ảnh thành cột theo VỊ TRÍ LỖ TRÒN** — không cắt mù 1/N. Thùng thường xếp lệch,
+   nên cắt 1/3 cứng dễ làm 1 tile "ăn" sang 2 cột → đếm gấp đôi. Worker phát hiện lỗ tròn,
+   phân cụm toạ độ X của chúng để tìm **tâm các cột thật**, rồi cắt ở khoảng giữa các cụm
+   (fallback về chia đều khi tín hiệu lỗ quá yếu). Mỗi cột ~1500px, được Claude cấp trọn
+   1568px. Tiền xử lý: normalize + sharpen cho nét chữ.
 4. **Prompt đếm theo TẦNG thùng + mỏ neo lỗ tròn**: coi mỗi lớp xếp chồng = 1 thùng, dùng
    lỗ tròn (vòng tối) để định vị từng tầng (nhiều lỗ vẫn 1 thùng); thùng có nhãn mờ vẫn
    đếm (không bịa chữ); 1 thùng nhiều nhãn → lấy nhãn lớn nhất, đếm 1; hộp khác màu đếm

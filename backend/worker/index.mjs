@@ -1,7 +1,7 @@
 import { BedrockRuntimeClient, ConverseStreamCommand } from "@aws-sdk/client-bedrock-runtime";
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import sharp from "sharp";
-import { countHoles } from "./holes.mjs";
+import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
 const BEDROCK_REGION = process.env.BEDROCK_REGION || REGION;
@@ -115,19 +115,37 @@ async function buildTiles(buffer) {
   const H = meta.height || 0;
   const { cols, rows } = decideGrid(W, H);
 
-  const tileW = Math.floor(W / cols);
+  // Column boundaries: prefer cuts derived from where the round holes cluster (the true
+  // column centres), because boxes are often shifted/staggered and a blind 1/N cut can slice
+  // through a box row — making a tile capture two stacks (double counting). Fall back to even
+  // thirds when the hole signal is too weak to trust.
+  let boundaries = null; // array of x cut fractions, length cols-1
+  let cutSource = "even";
+  if (rows <= 1 && cols >= 2) {
+    try {
+      const det = await detectHoles(oriented);
+      const cuts = det ? columnCutsFromHoles(det.xs, cols) : null;
+      if (cuts && cuts.length === cols - 1) { boundaries = cuts; cutSource = "holes"; }
+    } catch (_) { /* fall back to even */ }
+  }
+
+  const xEdges = [0];
+  if (boundaries) for (const c of boundaries) xEdges.push(Math.round(c * W));
+  else for (let c = 1; c < cols; c++) xEdges.push(Math.round((c / cols) * W));
+  xEdges.push(W);
+
   const tileH = Math.floor(H / rows);
   const tiles = [];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const left = c * tileW;
+      const left = xEdges[c];
       const top = r * tileH;
-      const w = (c === cols - 1) ? (W - left) : tileW;
+      const w = xEdges[c + 1] - left;
       const h = (r === rows - 1) ? (H - top) : tileH;
       tiles.push(await makeColumnTile(oriented, left, top, w, h));
     }
   }
-  return { tiles, cols, rows };
+  return { tiles, cols, rows, cutSource };
 }
 
 // Retry wrapper: under heavy parallelism Bedrock can throttle. Retry transient errors
@@ -213,7 +231,7 @@ export const handler = async (event) => {
     const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
     const buffer = await streamToBuffer(obj.Body);
 
-    const { tiles, cols, rows } = await buildTiles(buffer);
+    const { tiles, cols, rows, cutSource } = await buildTiles(buffer);
 
     // ENSEMBLE + per-column hole cross-check: fire every tile × every vote in parallel,
     // and detect holes on each column tile (reference signal, per column).
@@ -320,6 +338,7 @@ export const handler = async (event) => {
       jobId, filename, name,
       boxCount,
       grid: `${cols}x${rows}`,
+      cutSource,
       tiles: tiles.length,
       votes: VOTES,
       columnCounts: colCounts,

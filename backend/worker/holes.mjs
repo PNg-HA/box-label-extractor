@@ -27,7 +27,7 @@ function morph(src, W, H, r, dilate) {
   return out;
 }
 
-export async function countHoles(buffer) {
+export async function detectHoles(buffer) {
   try {
     const oriented = sharp(buffer, { failOn: "none" }).rotate();
     const meta = await oriented.metadata();
@@ -73,11 +73,11 @@ export async function countHoles(buffer) {
 
     const imgArea = N;
     const cand = blobs.filter(b => b.area > imgArea * 0.0005 && b.area < imgArea * 0.04);
-    if (!cand.length) return 0;
+    if (!cand.length) return { holes: 0, xs: [] };
     const areas = cand.map(b => b.area).sort((a, b) => a - b);
     const medA = areas[Math.floor(areas.length / 2)];
 
-    let holes = 0;
+    const xs = [];
     for (const b of cand) {
       const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1, aspect = bw / bh;
       if (aspect < 0.55 || aspect > 1.8) continue;
@@ -93,10 +93,43 @@ export async function countHoles(buffer) {
       const meanR = rs.reduce((a, c) => a + c, 0) / cnt;
       const cv = Math.sqrt(rs.reduce((a, c) => a + (c - meanR) * (c - meanR), 0) / cnt) / meanR;
       if (cv > CFG.cvMax) continue;
-      holes++;
+      xs.push(b.cx / W);  // X centroid as a fraction of width
     }
-    return holes;
+    xs.sort((a, b) => a - b);
+    return { holes: xs.length, xs };
   } catch (e) {
     return null; // never break the main pipeline
   }
+}
+
+export async function countHoles(buffer) {
+  const r = await detectHoles(buffer);
+  return r ? r.holes : null;
+}
+
+// 1D k-means on hole X-fractions -> column cut boundaries (fractions of width).
+// Returns null if there isn't enough signal to trust the clustering.
+export function columnCutsFromHoles(xs, k) {
+  if (!xs || xs.length < k * 3) return null;  // need a few holes per column to be reliable
+  let centers = [];
+  for (let i = 0; i < k; i++) centers.push(xs[Math.floor((i + 0.5) / k * xs.length)]);
+  for (let iter = 0; iter < 40; iter++) {
+    const groups = centers.map(() => []);
+    for (const x of xs) {
+      let bi = 0, bd = Infinity;
+      centers.forEach((c, i) => { const d = Math.abs(x - c); if (d < bd) { bd = d; bi = i; } });
+      groups[bi].push(x);
+    }
+    if (groups.some(g => g.length === 0)) return null;  // degenerate clustering
+    const nc = groups.map((g, i) => g.reduce((a, b) => a + b, 0) / g.length);
+    if (nc.every((c, i) => Math.abs(c - centers[i]) < 1e-4)) { centers = nc; break; }
+    centers = nc;
+  }
+  centers.sort((a, b) => a - b);
+  // sanity: centers should be reasonably spread, not bunched
+  const cuts = [];
+  for (let i = 1; i < centers.length; i++) cuts.push((centers[i - 1] + centers[i]) / 2);
+  // reject if any two centers are too close (clustering collapsed)
+  for (let i = 1; i < centers.length; i++) if (centers[i] - centers[i - 1] < 0.08) return null;
+  return cuts;
 }
