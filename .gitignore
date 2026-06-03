@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# build / deploy artifacts
+deploy/*.zip
+*.out.json
+
+# test sample images (large warehouse photos, kept out of git)
+test/*.jpg
+test/*.jpeg
+test/*.png
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# local env
+.env
+*.local

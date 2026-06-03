@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Label Extractor · Claude Opus 4.6</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Box Label Extractor</h1>
+      <p class="sub">Trích xuất nhãn thùng hàng bằng Claude Opus 4.6 trên Amazon Bedrock</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="uploader" id="dropzone">
+      <div class="drop-inner">
+        <input type="file" id="fileInput" accept="image/*" multiple hidden />
+        <p class="drop-title">Kéo thả ảnh vào đây</p>
+        <p class="drop-or">hoặc</p>
+        <button class="btn primary" id="pickBtn" type="button">Chọn ảnh từ máy</button>
+        <p class="hint">JPG, PNG, WEBP · chọn nhiều ảnh cùng lúc · ảnh lớn được tự nén</p>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button class="btn primary" id="processBtn" disabled>Xử lý tất cả</button>
+      <button class="btn" id="downloadAllBtn" disabled>Tải tất cả (Excel)</button>
+      <button class="btn ghost" id="clearBtn" disabled>Xóa hết</button>
+      <span class="summary" id="globalSummary"></span>
+    </div>
+
+    <section id="cards" class="cards"></section>
+  </main>
+
+  <footer class="foot">
+    <span id="apiBadge"></span>
+  </footer>
+
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
