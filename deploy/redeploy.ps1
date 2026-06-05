@@ -15,7 +15,7 @@ Write-Host "== Zipping Worker ==" -ForegroundColor Cyan
 Push-Location "$ROOT\backend\worker"
 # Ensure sharp has the Linux x64 native binaries (Lambda runtime), not just Windows.
 npm install --omit=dev --include=optional --os=linux --libc=glibc --cpu=x64 sharp | Out-Null
-Compress-Archive -Path .\index.mjs,.\holes.mjs,.\node_modules,.\package.json -DestinationPath "$PSScriptRoot\worker.zip" -Force
+Compress-Archive -Path .\index.mjs,.\holes.mjs,.\textract.mjs,.\node_modules,.\package.json -DestinationPath "$PSScriptRoot\worker.zip" -Force
 Pop-Location
 
 Write-Host "== Updating Lambda code ==" -ForegroundColor Cyan

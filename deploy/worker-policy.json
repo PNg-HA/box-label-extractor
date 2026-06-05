@@ -18,6 +18,12 @@
       "Effect": "Allow",
       "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
       "Resource": "*"
+    },
+    {
+      "Sid": "Textract",
+      "Effect": "Allow",
+      "Action": ["textract:DetectDocumentText"],
+      "Resource": "*"
     }
   ]
 }

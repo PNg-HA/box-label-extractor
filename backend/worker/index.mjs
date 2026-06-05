@@ -2,6 +2,7 @@ import { BedrockRuntimeClient, ConverseStreamCommand } from "@aws-sdk/client-bed
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import sharp from "sharp";
 import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
+import { ocrLines } from "./textract.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
 const BEDROCK_REGION = process.env.BEDROCK_REGION || REGION;
@@ -241,8 +242,20 @@ async function callModelStream(tileBuffer, promptText) {
   throw lastErr;
 }
 
-async function extractFromTile(tileBuffer) {
-  return callModelStream(tileBuffer, PROMPT);
+function ocrBlock(ocr) {
+  if (!ocr || !ocr.length) return "";
+  // cap to keep prompt size reasonable on very dense tiles
+  const lines = ocr.slice(0, 400);
+  return `
+
+OCR REFERENCE (from Amazon Textract, read top-to-bottom). These are the exact characters detected on this crop — trust them for spelling/digits when a field is hard to read in the image (e.g. order numbers start with "TO-", codes like "VC9-B"). Do NOT use this list to change the BOX COUNT; count boxes from the image as instructed. Use it only to read field VALUES more accurately:
+<<<OCR
+${lines.join("\n")}
+OCR>>>`;
+}
+
+async function extractFromTile(tileBuffer, ocr) {
+  return callModelStream(tileBuffer, PROMPT + ocrBlock(ocr));
 }
 
 function modeWithTieHigh(nums) {
@@ -313,10 +326,14 @@ export const handler = async (event) => {
 
     const { tiles, cols, rows, cutSource } = await buildTiles(buffer);
 
+    // Textract OCR each column tile first (raw, accurate characters) — used as a reference
+    // to help the model read field values; runs in parallel, failure-safe (returns []).
+    const ocrPerTile = await Promise.all(tiles.map(t => ocrLines(t)));
+
     // ENSEMBLE + per-column hole cross-check: fire every tile × every vote in parallel,
     // and detect holes on each column tile (reference signal, per column).
-    const tileVotePromises = tiles.map(t =>
-      Array.from({ length: VOTES }, () => extractFromTile(t))
+    const tileVotePromises = tiles.map((t, i) =>
+      Array.from({ length: VOTES }, () => extractFromTile(t, ocrPerTile[i]))
     );
 
     const [allTileRuns, holesPerCol] = await Promise.all([
@@ -357,7 +374,7 @@ export const handler = async (event) => {
           const target = maxCol;
           try {
             const reRuns = await Promise.all(
-              Array.from({ length: VOTES }, () => extractFromTileWithPrompt(tiles[i], reexamPrompt(target)))
+              Array.from({ length: VOTES }, () => extractFromTileWithPrompt(tiles[i], reexamPrompt(target) + ocrBlock(ocrPerTile[i])))
             );
             for (const r of reRuns) {
               usage.inputTokens += r.usage?.inputTokens || 0;
@@ -422,6 +439,7 @@ export const handler = async (event) => {
       boxCount,
       grid: `${cols}x${rows}`,
       cutSource,
+      ocrUsed: ocrPerTile.some(o => o && o.length > 0),
       tiles: tiles.length,
       votes: VOTES,
       columnCounts: colCounts,

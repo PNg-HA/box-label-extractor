@@ -53,7 +53,7 @@ Async + polling vì mỗi ảnh nhiều cột × nhiều vote + thinking mất ~
 | S3 storage (private) | `gapv-label-storage-307711587176` (uploads/ + results/) |
 | S3 web (public site) | `gapv-label-web-307711587176` |
 | Lambda API | `gapv-label-api` (Node 22) — presigned upload + trigger |
-| Lambda Worker | `gapv-label-worker` (Node 22, 2048MB, 900s) — sharp tiling + ensemble + Bedrock |
+| Lambda Worker | `gapv-label-worker` (Node 22, 2048MB, 900s) — sharp tiling + ensemble + Textract OCR + Bedrock |
 | HTTP API | `gapv-label-http-api` — id `fen6lbzeah` |
 | IAM roles | `gapv-label-api-role`, `gapv-label-worker-role` |
 | Model | `global.anthropic.claude-sonnet-4-6` |
@@ -117,10 +117,17 @@ tự tiền xử lý + kết hợp nhiều tín hiệu phía mình:
 6. **Ensemble vote (song song)**: mỗi cột chạy `VOTES` lần, TẤT CẢ lời gọi (mọi cột × mọi
    vote) fire cùng lúc, rồi majority-vote số mỗi cột → khử dao động ngẫu nhiên. Latency
    ≈ 1 lời gọi.
-7. **Hole-detector cross-check (tham khảo)**: thuật toán xử lý ảnh thuần phát hiện lỗ tròn
+7. **Amazon Textract OCR (hybrid)**: mỗi cột được Textract đọc text thô (chính xác ký tự
+   hơn LLM trên nhãn in dày) → đưa danh sách dòng cho Claude làm "OCR reference" để điền
+   field VALUES chuẩn (order_number bắt đầu "TO-", mã "VC9-B", địa chỉ có dấu phẩy). Textract
+   KHÔNG đụng tới việc đếm thùng — chỉ giúp đọc chữ.
+8. **Hole-detector cross-check (tham khảo)**: thuật toán xử lý ảnh thuần phát hiện lỗ tròn
    (ngưỡng thích ứng theo độ sáng + morphological closing để lấp vật trong lỗ + kiểm tra
    độ-tròn). Chỉ **cảnh báo** `lowConfidence` khi số lỗ NHIỀU HƠN hẳn số model đếm (nghi
    model sót) — KHÔNG bao giờ tự sửa số.
+
+Quy tắc field: order_number prefix "TO-"; place có dấu phẩy = `destination` (địa chỉ đầy đủ),
+không phẩy = `shop_name`; `box_code` = mã in trên thùng carton (tin cậy hơn line_code trên nhãn).
 
 Kết quả kiểm chứng (6 ảnh, so với ground-truth): 4/6 đúng tuyệt đối, 2 ảnh dày ~45 thùng
 lệch 2-4 (thùng chồng sát, chụp nghiêng — giới hạn vật lý). UI hiện badge ⚠ khi lowConfidence.
