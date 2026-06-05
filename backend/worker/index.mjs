@@ -2,7 +2,8 @@ import { BedrockRuntimeClient, ConverseStreamCommand } from "@aws-sdk/client-bed
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import sharp from "sharp";
 import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
-import { ocrLines } from "./textract.mjs";
+import { ocrLinesWithGeom, sortLines } from "./textract.mjs";
+import { intactLabelRegions, filterLinesByRegions } from "./labelshape.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
 const BEDROCK_REGION = process.env.BEDROCK_REGION || REGION;
@@ -326,9 +327,14 @@ export const handler = async (event) => {
 
     const { tiles, cols, rows, cutSource } = await buildTiles(buffer);
 
-    // Textract OCR each column tile first (raw, accurate characters) — used as a reference
-    // to help the model read field values; runs in parallel, failure-safe (returns []).
-    const ocrPerTile = await Promise.all(tiles.map(t => ocrLines(t)));
+    // Textract OCR each column tile (raw, accurate characters). To avoid pulling text off
+    // TORN / partial / secondary labels, we detect INTACT (rectangular ~>=65%) white-label
+    // regions by image processing and keep only OCR lines whose center lies on an intact label.
+    const ocrPerTile = await Promise.all(tiles.map(async (t) => {
+      const [linesGeom, shape] = await Promise.all([ ocrLinesWithGeom(t), intactLabelRegions(t) ]);
+      const kept = filterLinesByRegions(linesGeom, shape.regions);
+      return sortLines(kept);
+    }));
 
     // ENSEMBLE + per-column hole cross-check: fire every tile × every vote in parallel,
     // and detect holes on each column tile (reference signal, per column).
