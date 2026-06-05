@@ -50,6 +50,8 @@ METHOD: Go layer by layer from the top. For each layer, confirm it is a real box
 
 For each box, read ALL printed text on its main label as key/value pairs. Use consistent snake_case keys (examples that may appear: shop_name, destination, product_name, product_code, order_number, weight, net_weight, quantity, lot, batch, date, line_code, number, barcode, total). Only include fields that actually appear. Read numbers/codes exactly (keep decimals like 1.26, codes like VC11.2).
 
+BOX CODE (important): Each cardboard box has a large code PRINTED ON THE CARTON itself (not on the paper label), in the form "VCx" — e.g. VC9, VC11.2, VC7.5, VC4.2. This is the box type. ALWAYS record it in a field named "box_code" with the exact value you see printed on the cardboard (e.g. "box_code": "VC9"). This carton code is usually large and clear, so read it carefully. Note: the small paper label may also show a similar "line_code" (often the same code with a "-B" suffix, e.g. VC9-B); read line_code too if visible, but box_code (the carton print) is the authoritative box type and must be filled whenever the carton code is legible.
+
 OUTPUT: Return your final answer as raw JSON on the LAST line, exactly:
 { "box_count": <int>, "labels": [ { "fields": { "<k>": "<v>" } } ] }
 box_count MUST equal labels.length.`;
@@ -265,13 +267,20 @@ function normLineCode(v) {
   return m ? m[0] : null;
 }
 
-// Count boxes per VC line code: { "VC9-B": 5, "VC11.2-B": 5, "unknown": 1 }, sorted desc.
+// Count boxes per VC code. The carton code printed on the cardboard (box_code, e.g. "VC9")
+// is the most reliable signal — the small label's line_code is often misread (e.g. VC9-B -> VCD-B).
+// So we look at box_code first, then other code fields, then scan ALL fields for any VC pattern.
 function summarizeLineCodes(labels) {
   const counts = new Map();
+  const prefFields = ["box_code", "line_code_box", "carton_code", "box", "line_code", "lineCode", "line"];
   for (const l of labels) {
     const f = l.fields || {};
-    const raw = f.line_code ?? f.lineCode ?? f.box_code ?? f.line ?? null;
-    const code = normLineCode(raw) || "unknown";
+    let code = null;
+    for (const k of prefFields) { const n = normLineCode(f[k]); if (n) { code = n; break; } }
+    if (!code) {  // last resort: any field value containing a VC code
+      for (const v of Object.values(f)) { const n = normLineCode(v); if (n) { code = n; break; } }
+    }
+    code = code || "unknown";
     counts.set(code, (counts.get(code) || 0) + 1);
   }
   return Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1]));
