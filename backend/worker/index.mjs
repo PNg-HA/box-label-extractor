@@ -255,15 +255,14 @@ function pickLabels(runs, count) {
   return best.labels;
 }
 
-// Normalize a VC line code so small OCR variants merge (e.g. "vc11.2-b", "VC11.2 B" -> "VC11.2-B").
+// Normalize a VC line code to its BASE code, grouping suffix variants together:
+// "VC9-B"/"VC9 B"/"vc9b" -> "VC9", "VC11.2-B" -> "VC11.2". The trailing -letter (e.g. -B)
+// is dropped so VC9 and VC9-B count as the same type.
 function normLineCode(v) {
   if (v == null) return null;
-  let s = String(v).toUpperCase().replace(/\s+/g, "");
-  const m = s.match(/VC\d+(?:\.\d+)?(?:-?[A-Z])?/);  // VC9, VC11.2, VC9-B, VC4.2-B ...
-  if (!m) return null;
-  s = m[0];
-  s = s.replace(/(VC\d+(?:\.\d+)?)([A-Z])$/, "$1-$2"); // ensure dash before trailing letter
-  return s;
+  const s = String(v).toUpperCase().replace(/\s+/g, "");
+  const m = s.match(/VC\d+(?:\.\d+)?/);   // base code only: VC9, VC11.2, VC4.2, VC7.5 ...
+  return m ? m[0] : null;
 }
 
 // Count boxes per VC line code: { "VC9-B": 5, "VC11.2-B": 5, "unknown": 1 }, sorted desc.
