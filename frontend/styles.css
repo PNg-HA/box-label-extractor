@@ -208,6 +208,24 @@ pre.json {
   font-weight: 500;
   border-bottom: 1px solid var(--border);
 }
+
+.vc-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.vc-chip {
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.vc-chip b { font-weight: 700; }
 .count-pill.warn {
   background: var(--amber-soft);
   color: var(--amber);

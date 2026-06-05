@@ -105,7 +105,13 @@ function render() {
       const warn = job.lowConfidence
         ? `<div class="warn-msg">⚠ ${job.crossCheckNote || "Số đếm có thể chưa chính xác — nên kiểm tra lại."}${typeof job.holeCount === "number" ? ` (phát hiện ~${job.holeCount} lỗ tròn)` : ""}</div>`
         : "";
-      body = `${warn}<pre class="json">${syntaxHighlight(job.result)}</pre>`;
+      const lcs = job.result.line_code_summary || {};
+      const lcEntries = Object.entries(lcs);
+      const vcSummary = lcEntries.length
+        ? `<div class="vc-summary">${lcEntries.map(([k, v]) =>
+            `<span class="vc-chip"><b>${v}</b> ${k}</span>`).join("")}</div>`
+        : "";
+      body = `${warn}${vcSummary}<pre class="json">${syntaxHighlight(job.result)}</pre>`;
     } else if (job.status === "error") {
       body = `<div class="err-msg">${job.error || "Đã xảy ra lỗi"}</div>`;
     } else {
@@ -264,8 +270,13 @@ function downloadCsv(jobId) {
   const job = jobs.find(j => j.id === jobId);
   if (!job || !job.result) return;
   const { cols, rows } = labelsToRows(job.result);
+  const lcs = job.result.line_code_summary || {};
+  const lcLines = Object.entries(lcs).map(([k, v]) => `${k},${v}`);
   const lines = [
     `box_count,${job.boxCount}`,
+    "",
+    "line_code,count",
+    ...lcLines,
     "",
     cols.join(","),
     ...rows.map(r => cols.map(c => csvEscape(r[c])).join(",")),
@@ -300,15 +311,33 @@ function downloadAllExcel() {
   const wb = XLSX.utils.book_new();
   const used = new Set();
 
-  // summary sheet first
-  const summary = [["image", "json_name", "box_count"]];
-  for (const j of done) summary.push([j.filename, `${j.name}.json`, j.boxCount]);
+  // collect all VC codes seen across images for summary columns
+  const allCodes = new Set();
+  for (const j of done) Object.keys(j.result.line_code_summary || {}).forEach(c => allCodes.add(c));
+  const codeCols = Array.from(allCodes);
+
+  // summary sheet first: image, json_name, box_count, then one column per VC code
+  const summary = [["image", "json_name", "box_count", ...codeCols]];
+  for (const j of done) {
+    const lcs = j.result.line_code_summary || {};
+    summary.push([j.filename, `${j.name}.json`, j.boxCount, ...codeCols.map(c => lcs[c] || 0)]);
+  }
   const wsSum = XLSX.utils.aoa_to_sheet(summary);
   XLSX.utils.book_append_sheet(wb, wsSum, uniqueSheetName("Summary", used));
 
   for (const job of done) {
     const { cols, rows } = labelsToRows(job.result);
-    const aoa = [["box_count", job.boxCount], [], cols, ...rows.map(r => cols.map(c => r[c]))];
+    const lcs = job.result.line_code_summary || {};
+    const lcRows = Object.entries(lcs).map(([k, v]) => [k, v]);
+    const aoa = [
+      ["box_count", job.boxCount],
+      [],
+      ["line_code", "count"],
+      ...lcRows,
+      [],
+      cols,
+      ...rows.map(r => cols.map(c => r[c])),
+    ];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     XLSX.utils.book_append_sheet(wb, ws, uniqueSheetName(job.name, used));
   }

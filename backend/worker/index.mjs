@@ -255,6 +255,29 @@ function pickLabels(runs, count) {
   return best.labels;
 }
 
+// Normalize a VC line code so small OCR variants merge (e.g. "vc11.2-b", "VC11.2 B" -> "VC11.2-B").
+function normLineCode(v) {
+  if (v == null) return null;
+  let s = String(v).toUpperCase().replace(/\s+/g, "");
+  const m = s.match(/VC\d+(?:\.\d+)?(?:-?[A-Z])?/);  // VC9, VC11.2, VC9-B, VC4.2-B ...
+  if (!m) return null;
+  s = m[0];
+  s = s.replace(/(VC\d+(?:\.\d+)?)([A-Z])$/, "$1-$2"); // ensure dash before trailing letter
+  return s;
+}
+
+// Count boxes per VC line code: { "VC9-B": 5, "VC11.2-B": 5, "unknown": 1 }, sorted desc.
+function summarizeLineCodes(labels) {
+  const counts = new Map();
+  for (const l of labels) {
+    const f = l.fields || {};
+    const raw = f.line_code ?? f.lineCode ?? f.box_code ?? f.line ?? null;
+    const code = normLineCode(raw) || "unknown";
+    counts.set(code, (counts.get(code) || 0) + 1);
+  }
+  return Object.fromEntries([...counts.entries()].sort((a, b) => b[1] - a[1]));
+}
+
 async function putResult(jobId, obj) {
   await s3.send(new PutObjectCommand({
     Bucket: BUCKET,
@@ -350,6 +373,9 @@ export const handler = async (event) => {
     const boxCount = merged.length;
     const holeCount = holesPerCol.reduce((a, h) => a + (h || 0), 0);
 
+    // Breakdown by VC line code: how many boxes of each type (e.g. VC9-B: 5, VC11.2-B: 5).
+    const lineCodeSummary = summarizeLineCodes(merged);
+
     // Cross-check flag (reference only): if a column still looks short after re-exam.
     const flags = [...reexamFlags];
     let lowConfidence = false;
@@ -385,10 +411,11 @@ export const handler = async (event) => {
       columnCounts: colCounts,
       holesPerColumn: holesPerCol,
       holeCount,
+      lineCodeSummary,
       reexamined: reexamFlags,
       lowConfidence,
       crossCheckNote,
-      data: { box_count: boxCount, labels: merged },
+      data: { box_count: boxCount, line_code_summary: lineCodeSummary, labels: merged },
       model: MODEL_ID,
       usage,
       processingMs: Date.now() - startedAt,

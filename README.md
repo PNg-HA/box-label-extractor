@@ -75,12 +75,15 @@ Async + polling vì mỗi ảnh nhiều cột × nhiều vote + thinking mất ~
 ```json
 {
   "box_count": 31,
+  "line_code_summary": { "VC9-B": 5, "VC11.2-B": 3, "VC9": 16, "VC11.2": 6 },
   "labels": [
     { "index": 1, "fields": { "shop_name": "VIN-LONG BIEN", "destination": "HN-VinCom Plaza LB", "order_number": "TO-DL-26-074028", "number": "1.1", "line_code": "VC9-B", "total": "9" } }
   ]
 }
 ```
 
+`line_code_summary` = số thùng theo từng loại VC (gom theo `line_code`), hiển thị thành
+chip trên UI và đưa vào CSV (mục `line_code,count`) + Excel (cột riêng mỗi loại ở sheet Summary).
 Tên khối JSON trên UI = tên file ảnh đã bỏ đuôi (vd `IMG_5816.json`).
 
 ## Tính năng UI
