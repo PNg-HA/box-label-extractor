@@ -40,7 +40,7 @@ async function runOne(filename) {
     await sleep(3000);
     r = await fetch(`${API}/result/${jobId}`);
     const res = await r.json();
-    if (res.status === "done") return { boxCount: res.boxCount, grid: res.grid, holeCount: res.holeCount, lowConfidence: res.lowConfidence, columnCounts: res.columnCounts, processingMs: res.processingMs };
+    if (res.status === "done") return { boxCount: res.boxCount, grid: res.grid, holeCount: res.holeCount, lowConfidence: res.lowConfidence, columnCounts: res.columnCounts, processingMs: res.processingMs, vc: res.lineCodeSummary };
     if (res.status === "error") return { error: res.error };
   }
   return { error: "timeout" };
@@ -65,7 +65,8 @@ for (const s of settled) {
   const mark = diff === 0 ? "✓ EXACT" : `Δ ${diff > 0 ? "+" : ""}${diff}`;
   if (diff === 0) pass++;
   const cc = `holes≈${s.holeCount ?? "?"}  cols=[${(s.columnCounts||[]).join(",")}]  ${s.processingMs ? (s.processingMs/1000).toFixed(1)+"s" : ""}${s.lowConfidence ? "  ⚠LOW-CONF" : ""}`;
-  console.log(`${diff === 0 ? "✓" : "·"} ${s.f}\n    true=${s.truth}  got=${s.boxCount}  grid=${s.grid}  [${mark}]  ${cc}`);
+  const vc = s.vc ? "    VC: " + Object.entries(s.vc).map(([k,v])=>`${k}=${v}`).join("  ") : "";
+  console.log(`${diff === 0 ? "✓" : "·"} ${s.f}\n    true=${s.truth}  got=${s.boxCount}  grid=${s.grid}  [${mark}]  ${cc}${vc ? "\n"+vc : ""}`);
 }
 console.log("===============================================");
 console.log(`Exact: ${pass}/${settled.length} | total abs error: ${totalDiff} | wall-clock (all parallel): ${wallSec}s`);
