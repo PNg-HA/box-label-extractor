@@ -11,6 +11,14 @@ test/*.jpg
 test/*.jpeg
 test/*.png
 
+# temporary/debug test scripts (keep only batch-test.mjs and test-api.mjs)
+test/vc-check.mjs
+test/inspect.mjs
+test/peek.mjs
+test/debug-*.mjs
+test/*-lab.mjs
+test/*-dump.jpg
+
 # OS / editor
 .DS_Store
 Thumbs.db
