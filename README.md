@@ -40,6 +40,7 @@ flowchart TD
         P4 --> P6["cross-check: cảnh báo lowConfidence"]
         P3 --> P6
         P6 --> P7["gộp cột + đánh index + đo thời gian"]
+        P7 --> P8["backfill OCR-toạ-độ → reconcile chéo nhãn → Claude consolidate<br/>(điền/sửa trường, KHÓA số đếm)"]
     end
 ```
 
@@ -53,7 +54,7 @@ Async + polling vì mỗi ảnh nhiều cột × nhiều vote + thinking mất ~
 | S3 storage (private) | `gapv-label-storage-307711587176` (uploads/ + results/) |
 | S3 web (public site) | `gapv-label-web-307711587176` |
 | Lambda API | `gapv-label-api` (Node 22) — presigned upload + trigger |
-| Lambda Worker | `gapv-label-worker` (Node 22, 2048MB, 900s) — sharp tiling + ensemble + Textract OCR + Bedrock |
+| Lambda Worker | `gapv-label-worker` (Node 22, 2048MB, 900s) — tiling + ensemble đếm + Textract OCR + backfill/reconcile/consolidate trường |
 | HTTP API | `gapv-label-http-api` — id `fen6lbzeah` |
 | IAM roles | `gapv-label-api-role`, `gapv-label-worker-role` |
 | Model | `global.anthropic.claude-sonnet-4-6` |
@@ -129,8 +130,47 @@ tự tiền xử lý + kết hợp nhiều tín hiệu phía mình:
 Quy tắc field: order_number prefix "TO-"; place có dấu phẩy = `destination` (địa chỉ đầy đủ),
 không phẩy = `shop_name`; `box_code` = mã in trên thùng carton (tin cậy hơn line_code trên nhãn).
 
-Kết quả kiểm chứng (6 ảnh, so với ground-truth): 4/6 đúng tuyệt đối, 2 ảnh dày ~45 thùng
-lệch 2-4 (thùng chồng sát, chụp nghiêng — giới hạn vật lý). UI hiện badge ⚠ khi lowConfidence.
+### Đọc trường ĐẦY ĐỦ + CHÍNH XÁC (pipeline field, sau khi đã đếm)
+
+Claude vừa đếm vừa đọc trên cột thu nhỏ ~1568px nên hay bỏ sót chữ nhỏ (order/time/total).
+Sau khi chốt số thùng, có 3 pha bồi trường — KHÔNG pha nào được đổi số đếm:
+
+9. **Backfill theo toạ độ OCR** (`backfill.mjs`, deterministic, 0 model): chia mỗi cột thành
+   N băng theo số thùng, điền order_number/time/total còn trống từ token Textract rơi đúng băng
+   ("TO-…" → order, "TOTAL n" → total, "HH:MM:SS" → time). Chỉ điền chỗ trống.
+10. **Reconcile chéo nhãn** (`reconcile.mjs`, deterministic, 0 model): trong 1 ảnh = 1 đợt giao,
+    cùng shop_name → cùng order_number (HN-RETAIL ↔ 074117…). Điền order/box_code từ consensus
+    của lô; suy `line_code = box_code + hậu tố` (học hậu tố "-B" từ chính lô). Đây là kiểu suy
+    luận pattern mà con người dùng khi nhãn mờ.
+11. **Claude consolidate** (1 lời gọi text-only/ảnh): đưa toàn bộ nhãn + toàn bộ OCR cho Claude
+    sửa/điền theo pattern toàn lô (sửa chữ số OCR nhiễu theo anh em, điền trường còn thiếu).
+    **Khóa số nhãn** — kết quả bị từ chối nếu đổi số đếm, nên chỉ cải thiện trường.
+
+### Kết quả kiểm chứng (12 ảnh, web đã deploy, chạy song song)
+
+**Đếm thùng:** 11/12 đúng tuyệt đối, tổng sai số = 1 (z634118 lệch −1). Mỗi ảnh 95–175s
+(đều < 3 phút), wall-clock 12 ảnh song song ~181s.
+
+**Độ phủ trường (KPI applicability-aware — chỉ tính ảnh mà LOẠI nhãn có in trường đó):**
+
+| trường | phủ | ghi chú |
+|--------|----:|--------|
+| box_code | 100% | |
+| line_code | 100% | suy từ box_code khi mờ |
+| shop_name | 99.7% | |
+| number | 98.9% | |
+| order_number | 86.2% | thấp ở kho SG — OCR xác nhận nhiều nhãn vốn không in / quá mờ (z505382 chỉ 9/45 có token "TO-") |
+| total | 85.9% | nhiều ảnh nhãn không in total (loại n/a khỏi mẫu số) |
+| **OVERALL** | **95.7%** | |
+
+KPI quan trọng: KHÔNG tính một trường lên ảnh mà loại nhãn của ảnh đó không in trường ấy
+(vd nhãn VC35 xuất khẩu không có order/total) — nếu tính gộp sẽ kéo điểm xuống oan (84% → 95.7%).
+
+**Độ chính xác giá trị (so ground-truth từng-nhãn):**
+- IMG_5816 (kho HN, nhãn đầy đủ): shop_name 31/31, box_type 31/31, order_number 30/31 (~100%/100%/96.8%).
+- IMG_5819 (VC35 xuất khẩu): box_type 15/15, total 15/15 (100%).
+
+UI hiện badge ⚠ khi lowConfidence.
 
 Tham số env của `gapv-label-worker`:
 `MODEL_ID`, `THINKING_BUDGET` (16000), `MAX_TOKENS` (48000), `TILE_TARGET_PX` (1500),
