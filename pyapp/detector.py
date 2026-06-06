@@ -106,7 +106,31 @@ def detect_in_column(col_bgr: np.ndarray,
                 continue
             cands.append((x, y, x + bw2, y + bh2))
     # cluster recurring detections across thresholds; require multi-threshold support
-    return _cluster_vote(cands, iou_dedup, min_votes)
+    kept = _cluster_vote(cands, iou_dedup, min_votes)
+    # split vertically-merged labels: stacked labels can fuse into one tall contour, which
+    # would under-count. If a box is much taller than the median label, cut it into N rows.
+    return _split_tall(kept)
+
+
+def _split_tall(boxes, tall_ratio: float = 1.6):
+    if len(boxes) < 3:
+        return boxes
+    heights = sorted(b[3] - b[1] for b in boxes)
+    med = heights[len(heights) // 2]
+    if med <= 0:
+        return boxes
+    out = []
+    for (x0, y0, x1, y1) in boxes:
+        h = y1 - y0
+        n = int(round(h / med))
+        if n >= 2 and h >= med * tall_ratio:
+            step = h / n
+            for i in range(n):
+                out.append((x0, int(y0 + i * step), x1, int(y0 + (i + 1) * step)))
+        else:
+            out.append((x0, y0, x1, y1))
+    out.sort(key=lambda b: b[1])
+    return out
 
 
 def detect_labels(img_bgr: np.ndarray, columns: int = 3, **kw):
