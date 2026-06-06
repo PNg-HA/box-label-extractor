@@ -294,6 +294,79 @@ async function extractFromTile(tileBuffer, ocr) {
   return callModelStream(tileBuffer, PROMPT + ocrBlock(ocr));
 }
 
+// Text-only model call (no image): used for the CONSOLIDATION pass that fixes/fills fields
+// across all labels of an image using the full OCR + pattern reasoning. No thinking budget
+// needed (it's a structuring task), which keeps it fast and cheap (~one call per image).
+async function callModelText(promptText) {
+  const maxAttempts = 6;
+  let lastErr;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const res = await bedrock.send(new ConverseStreamCommand({
+        modelId: MODEL_ID,
+        messages: [{ role: "user", content: [{ text: promptText }] }],
+        inferenceConfig: { maxTokens: MAX_TOKENS },
+      }));
+      let text = "", usage = {};
+      for await (const ev of res.stream) {
+        const delta = ev.contentBlockDelta?.delta;
+        if (delta?.text) text += delta.text;
+        if (ev.metadata?.usage) usage = ev.metadata.usage;
+      }
+      return { text, usage };
+    } catch (err) {
+      lastErr = err;
+      const name = err?.name || "";
+      const retryable = RETRYABLE.has(name) || err?.$retryable || /throttl|timeout|rate/i.test(String(err?.message));
+      if (!retryable || attempt === maxAttempts - 1) throw err;
+      await sleep(Math.min(20000, 800 * 2 ** attempt) + Math.floor(Math.random() * 500));
+    }
+  }
+  throw lastErr;
+}
+
+// CONSOLIDATION pass. Give Claude the labels we already have (in order) plus the full OCR per
+// column, and ask it to CORRECT/FILL fields by reasoning over the whole batch's pattern
+// (same shop -> same order_number; pre-printed forms share time/total layout; fix OCR-garbled
+// digits). It MUST return exactly the same number of labels in the same order — it may only
+// edit field VALUES, never add/remove/reorder boxes (the count is already trusted).
+const CONSOLIDATE_PROMPT = `You are correcting structured data extracted from ONE photo of warehouse boxes (a single delivery batch). You are given the current per-box fields (top-to-bottom, grouped by column) and the raw Amazon Textract OCR for each column. Use PATTERN REASONING across the whole batch to fix and complete the fields:
+
+- Same shop_name almost always has the SAME order_number within this batch (e.g. HN-RETAIL -> TO-DL-26-074117, HN TRUNG HOA -> 074118). If one box reads an order clearly and a sibling with the same shop is blank/garbled, copy the consistent value.
+- order_number always starts "TO-" (letter O). Fix OCR digits using sibling consensus.
+- These are PRE-PRINTED forms: if most boxes show time / total, the rest likely do too — fill from OCR at that position when present.
+- box_code is the big code on the carton (VC9, VC11.2 ...); line_code is the label code (often "-B").
+- A value with a comma is "destination" (full address); without a comma it is "shop_name".
+- ONLY fill a field if the OCR or a strong batch pattern supports it. NEVER invent a value with no evidence. Keep values the current data already has unless the OCR clearly shows they are wrong.
+
+HARD RULES:
+- Return EXACTLY the same number of boxes, in the same order. Do NOT add, remove, merge or reorder boxes.
+- Output ONLY raw JSON on the last line: { "labels": [ { "fields": { ... } }, ... ] } with labels.length identical to the input.`;
+
+function buildConsolidatePrompt(merged, ocrPerTile) {
+  const cur = merged.map((l, i) => ({ i: i + 1, fields: l.fields || {} }));
+  const ocr = ocrPerTile.map((lines, c) => `--- COLUMN ${c + 1} OCR ---\n${(lines || []).slice(0, 400).join("\n")}`).join("\n\n");
+  return `${CONSOLIDATE_PROMPT}
+
+CURRENT DATA (${merged.length} boxes, in order):
+${JSON.stringify(cur)}
+
+FULL OCR PER COLUMN:
+${ocr}`;
+}
+
+// Apply consolidation result: only overwrite fields, keep count/order from `merged`.
+function applyConsolidation(merged, text) {
+  const data = extractJson(text);
+  const out = Array.isArray(data.labels) ? data.labels : null;
+  if (!out || out.length !== merged.length) return false;   // reject if count changed
+  for (let i = 0; i < merged.length; i++) {
+    const nf = out[i]?.fields;
+    if (nf && typeof nf === "object") merged[i].fields = nf;
+  }
+  return true;
+}
+
 function modeWithTieHigh(nums) {
   const freq = new Map();
   for (const n of nums) freq.set(n, (freq.get(n) || 0) + 1);
@@ -456,6 +529,19 @@ export const handler = async (event) => {
     // order_number / box_code. Fill blanks from the batch consensus (no model calls, fills
     // only, never overrides). This mirrors the human pattern-reasoning across siblings.
     try { reconcileFields(merged); } catch (_) { /* never break */ }
+
+    // CONSOLIDATION (one text-only model call): let Claude correct/fill fields across the whole
+    // batch using full OCR + pattern reasoning. Count is locked — result is rejected if it
+    // changes the number of boxes, so this can only improve field completeness/accuracy.
+    let consolidated = false;
+    try {
+      const { text, usage: cu } = await callModelText(buildConsolidatePrompt(merged, ocrPerTile));
+      usage.inputTokens += cu?.inputTokens || 0;
+      usage.outputTokens += cu?.outputTokens || 0;
+      consolidated = applyConsolidation(merged, text);
+      // re-run deterministic reconcile to fill any blanks the model still left
+      try { reconcileFields(merged); } catch (_) {}
+    } catch (_) { /* keep pre-consolidation labels on failure */ }
 
     const boxCount = merged.length;
     const holeCount = holesPerCol.reduce((a, h) => a + (h || 0), 0);
