@@ -1,0 +1,6 @@
+{
+  "note": "IMG_5819 = export VC35 carnation boxes. Labels carry: product name, box_type VC35, label_number, total=100, code H-502292. They DO NOT carry shop_name / order_number / time.",
+  "box_type": ["VC35","VC35","VC35","VC35","VC35","VC35","VC35","VC35","VC35","VC35","VC35","VC35","VC35","VC35","VC35"],
+  "total": [100,100,100,100,100,100,100,100,100,100,100,100,100,100,100],
+  "label_number": ["188.2","112.1","188.1","184.1","186.3","184.2","186.1","184.3","186.2","185.1","187.3","185.2","187.1","185.3","187.2"]
+}
