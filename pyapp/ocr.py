@@ -10,6 +10,7 @@ import json, time, base64
 import cv2
 import numpy as np
 import boto3
+from botocore.config import Config
 
 REGION = "ap-southeast-1"
 BEDROCK_MODEL = "global.anthropic.claude-sonnet-4-6"
@@ -20,6 +21,15 @@ def session(profile: str = "gapv50k"):
     if _session is None:
         _session = boto3.Session(profile_name=profile, region_name=REGION)
     return _session
+
+
+# Bedrock thinking on a dense column can take minutes to stream out. The default boto3
+# read_timeout is 60s, which made non-stream converse() time out and silently retry 5x
+# (~5 min) before failing. Use a long read timeout + no client-side timeout retries; we
+# handle throttling retries ourselves.
+def bedrock_client(profile: str = "gapv50k"):
+    cfg = Config(read_timeout=600, connect_timeout=15, retries={"max_attempts": 0, "mode": "standard"})
+    return session(profile).client("bedrock-runtime", config=cfg)
 
 
 def _encode(crop_bgr: np.ndarray, max_w: int = 1300, quality: int = 95) -> bytes:

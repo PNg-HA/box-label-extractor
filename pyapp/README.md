@@ -4,21 +4,32 @@ Dự án Python **độc lập**: dùng **OpenCV thật** để phát hiện + c
 thùng, sau đó OCR bằng **Amazon Textract** và/hoặc **Amazon Bedrock (Claude Sonnet 4.6)**.
 
 Khác với bản Node trong `../app` (dùng `sharp` xấp xỉ và để Claude tự đếm), bản này tách
-bạch hai khâu:
+bạch hai khâu, và **tự động chọn phương pháp đếm theo mật độ thùng**:
 
-- **Detect/crop = OpenCV** (xác định, không tốn tiền model, không "ảo giác").
-- **OCR/đọc field = Textract / Bedrock** trên từng nhãn đã cắt ở **độ phân giải gốc**.
+- **Router**: một lời gọi Bedrock rẻ (`quick_count`) ước lượng nhanh số thùng (theo nhãn
+  trắng nguyên, output chỉ là con số).
+- **≤ 35 thùng** → **OpenCV detect/crop** từng nhãn rồi OCR (Textract/Bedrock) ở độ phân
+  giải gốc. Xác định, không tốn model cho khâu detect, độ phủ field cao nhất.
+- **> 35 thùng** → **phương pháp DENSE**: chia ảnh thành cột dọc, đếm mỗi cột bằng
+  extended thinking + **ensemble majority vote** (mọi lời gọi chạy song song), cộng các cột.
+  Chịu được pallet xếp dày khi nhãn dính nhau làm OpenCV under-count.
 
 ```mermaid
-flowchart LR
-    A["ảnh gốc full-res"] --> B["auto_orient (EXIF)"]
-    B --> C["chia 3 cột dọc"]
-    C --> D["detect_in_column<br/>quét đa ngưỡng sáng 150..230<br/>contour ~chữ nhật/bình hành<br/>lọc area/aspect/fill + khử trùng IoU"]
+flowchart TD
+    A["ảnh gốc full-res"] --> O["auto_orient (EXIF)"]
+    O --> Q["quick_count (Bedrock, 1 call rẻ)"]
+    Q -->|<= 35| C["chia 3 cột dọc"]
+    Q -->|> 35| DEN["DENSE: chia cột + ensemble vote<br/>extended thinking, song song<br/>majority count mỗi cột → cộng"]
+    C --> D["detect_in_column (OpenCV)<br/>quét đa ngưỡng sáng 150..230<br/>contour ~chữ nhật/bình hành<br/>cluster-vote + merge containment"]
     D --> E["crop từng nhãn (native res)"]
     E --> F{engine}
-    F -->|textract| G["Textract DetectDocumentText<br/>→ dòng text thô"]
-    F -->|bedrock| H["Claude Sonnet 4.6<br/>→ field JSON"]
-    F -->|hybrid| I["Textract lines làm hint<br/>+ Claude → field JSON chuẩn"]
+    F -->|textract| G["Textract → dòng text thô"]
+    F -->|bedrock| H["Claude Sonnet 4.6 → field JSON"]
+    F -->|hybrid| I["Textract lines làm hint + Claude → field JSON"]
+    DEN --> Z["box_count + labels"]
+    G --> Z
+    H --> Z
+    I --> Z
 ```
 
 ## Vì sao tách detect bằng OpenCV
@@ -38,17 +49,20 @@ pip install -r requirements.txt          # opencv-python, numpy, boto3
 ## Dùng
 
 ```bash
-# OCR thô từng nhãn (nhanh)
-python pipeline.py ../IMG_5816.jpeg --engine textract
-
-# field JSON có cấu trúc cho mỗi nhãn
-python pipeline.py ../IMG_5816.jpeg --engine bedrock
-
-# tốt nhất: Textract làm hint cho Claude
+# tự động chọn phương pháp theo số thùng (mặc định, ngưỡng 35)
 python pipeline.py ../IMG_5816.jpeg --engine hybrid
 
-# vẽ khung nhãn đã detect ra file *_annotated.jpg để soi
-python pipeline.py ../IMG_5816.jpeg --engine textract --annotate
+# ép phương pháp / đổi ngưỡng
+python pipeline.py ../z....jpg --method dense
+python pipeline.py ../IMG_5816.jpeg --method opencv --engine textract
+python pipeline.py ../IMG_5816.jpeg --threshold 40
+
+# OCR thô từng nhãn (nhanh) / field JSON có cấu trúc
+python pipeline.py ../IMG_5816.jpeg --method opencv --engine textract
+python pipeline.py ../IMG_5816.jpeg --method opencv --engine bedrock
+
+# vẽ khung nhãn đã detect ra *_annotated.jpg (chỉ khi đi nhánh opencv)
+python pipeline.py ../IMG_5816.jpeg --annotate
 ```
 
 Output:
@@ -68,35 +82,52 @@ Output:
 
 | File | Vai trò |
 |------|---------|
-| `detector.py` | OpenCV: `auto_orient`, `detect_in_column` (quét đa ngưỡng), `detect_labels` (3 cột) |
+| `detector.py` | OpenCV: `auto_orient`, `detect_in_column` (quét đa ngưỡng + cluster-vote + merge containment), `detect_labels` (3 cột) |
+| `counter.py` | `quick_count` (router) + `count_dense` (chia cột + ensemble vote + extended thinking) |
 | `ocr.py` | `textract_lines`, `bedrock_fields` (Claude Sonnet 4.6), upscale crop trước khi OCR |
-| `pipeline.py` | nối detect→crop→OCR, `ThreadPoolExecutor`, CLI, `--annotate` |
-| `batch_detect.py` | benchmark detection vs ground-truth (12 ảnh) |
+| `pipeline.py` | router theo ngưỡng → opencv/dense, `ThreadPoolExecutor`, CLI, `--annotate` |
+| `batch_detect.py` | benchmark detection OpenCV thuần vs ground-truth |
+| `batch_count.py` | benchmark ĐẾM end-to-end có routing vs ground-truth |
+| `test_router.py` | kiểm tra `quick_count` phân nhánh đúng |
 | `eval_fields.py` | đo độ phủ field của hybrid trên 1 ảnh |
 | `tune.py` | quét tham số detector |
 
 ## Hiệu năng
 
+### Đếm end-to-end CÓ ROUTING (`python batch_count.py 35`)
+
+quick_count phân nhánh, rồi opencv (≤35) hoặc dense (>35):
+
+| ảnh | thật | quick | nhánh | cuối | lệch | giây |
+|-----|----:|----:|:--|----:|----:|----:|
+| IMG_5816.jpeg | 31 | 31 | opencv | 31 | 0 | 11 |
+| IMG_5817.jpeg | 34 | 34 | opencv | 31 | −3 | 12 |
+| IMG_5818.jpeg | 4 | 10 | opencv | 4 | 0 | 7 |
+| IMG_5819.jpeg | 15 | 17 | opencv | 14 | −1 | 8 |
+| IMG_5825.jpeg | 22 | 22 | opencv | 21 | −1 | 7 |
+| z…505382 | 45 | 45 | dense | 43 | −2 | 139 |
+| z…512641 | 27 | 27 | opencv | 30 | +3 | 8 |
+| z…609303 | 42 | 41 | dense | 48 | +6 | 239 |
+| z…634118 | 45 | 41 | dense | 43 | −2 | 161 |
+| z…817056 | 36 | 36 | dense | 36 | 0 | 131 |
+| z…874606 | 30 | 30 | opencv | 30 | 0 | 7 |
+| z…611275 | 40 | 40 | dense | 38 | −2 | 137 |
+
+**exact 4/12, tổng sai số tuyệt đối 20** (OpenCV thuần là 50). Router phân nhánh khớp 100%
+với ground-truth. Nhánh opencv ~7–12s/ảnh; nhánh dense ~130–240s/ảnh (3 cột × 3 vote thinking,
+song song 4 luồng). z609303 (thùng hồng, bố cục không phải 3 cột đều) là ca khó nhất.
+
+> **Lưu ý kỹ thuật quan trọng:** nhánh dense phải dùng `converse_stream` + `read_timeout=600s`.
+> Dùng `converse` (non-stream) bị **read_timeout mặc định 60s** của boto3 cắt giữa lúc model
+> đang "thinking" trên ảnh dày → boto3 tự retry 5× (~5 phút) rồi trả 0, vừa cực chậm vừa sai.
+> Streaming giữ kết nối sống nên 1 cột chỉ ~60–120s.
+
 ### Detection (OpenCV thuần, không OCR — `python batch_detect.py`)
 
-| ảnh | thật | detect | lệch |
-|-----|----:|----:|----:|
-| IMG_5816.jpeg | 31 | 31 | 0 |
-| IMG_5817.jpeg | 34 | 33 | −1 |
-| IMG_5818.jpeg | 4 | 4 | 0 |
-| IMG_5819.jpeg | 15 | 14 | −1 |
-| IMG_5825.jpeg | 22 | 23 | +1 |
-| z…505382 | 45 | 34 | −11 |
-| z…512641 | 27 | 33 | +6 |
-| z…609303 | 42 | 35 | −7 |
-| z…634118 | 45 | 34 | −11 |
-| z…817056 | 36 | 36 | 0 |
-| z…874606 | 30 | 31 | +1 |
-| z…611275 | 40 | 29 | −11 |
-
-**exact 3/12, tổng sai số tuyệt đối 50.** Ảnh điện thoại độ phân giải cao (5712×4284) gần
-như chính xác; ảnh `z*` (2560×1920) thùng xếp dày 45 cái sát nhau → nhãn dính vào nhau khi
-nhị phân hoá nên under-count. ~0.2–1.2s/ảnh.
+Đo riêng khả năng detect của OpenCV trên MỌI ảnh (kể cả ảnh dày vốn được route sang dense):
+**exact 3/12, tổng sai số ~50–60.** Ảnh điện thoại hi-res (5712×4284) gần như chính xác
+(5816 đúng 31/31); ảnh `z*` (2560×1920) xếp dày 45 cái sát nhau → nhãn dính khi nhị phân hoá
+nên under-count — đây chính là lý do cần nhánh dense. ~0.2–1.2s/ảnh.
 
 ### Field coverage — engine hybrid (`python eval_fields.py ../IMG_5816.jpeg hybrid`)
 
@@ -121,17 +152,16 @@ nhãn, không nằm trong vùng crop nhãn (bản `app` lấy box_code ở mức
 
 ## So sánh với bản Node (`../app`)
 
-| | Node `app` (sharp + Bedrock) | Python `pyapp` (OpenCV + Textract/Bedrock) |
+| | Node `app` (sharp + Bedrock) | Python `pyapp` (OpenCV + routing) |
 |---|---|---|
-| Phát hiện/đếm thùng | Claude đếm theo cột (tiling + ensemble vote + thinking) | OpenCV detect nhãn (xác định, không tốn model) |
+| Phát hiện/đếm thùng | Claude đếm theo cột (tiling + ensemble vote + thinking) | **Router**: OpenCV (≤35) hoặc dense ensemble (>35) |
 | Xử lý ảnh | `sharp` (xấp xỉ, không phải OpenCV) | OpenCV thật (threshold sweep, contour, morphology) |
 | OCR field | Bedrock + Textract hint ở mức **cột** | Textract/Bedrock ở mức **từng nhãn** native res |
-| Đếm chính xác | 10–11/12 đúng (ảnh dày ±1–2) | 3/12 exact, tốt trên ảnh hi-res, yếu ảnh `z*` dày |
+| Đếm chính xác | 10–11/12 đúng (ảnh dày ±1–2) | exact 4/12, tổng sai số 20 (±0–3 đa số, +6 ca khó) |
 | Phủ field (5816) | time ~27/31 | time 30/31, order 30/31 |
 | Triển khai | Lambda + API Gateway + web S3 (online) | CLI local |
-| Chi phí đếm | tốn nhiều invoke model | 0 (đếm bằng CV) |
+| Chi phí đếm | tốn nhiều invoke model | 0 cho ảnh ≤35 (CV); chỉ ảnh dày mới gọi model |
 
-Hai cách bổ trợ nhau: **đếm** thì OpenCV rẻ và xác định nhưng cần tinh chỉnh cho ảnh dày;
-**đọc field** thì cắt-nhãn-rồi-OCR cho độ phủ cao nhất. Bản Node mạnh ở đếm thùng (ensemble
-vote chịu được ảnh nghiêng/dày), bản Python mạnh ở đọc từng nhãn rõ nét và không tốn tiền
-model cho khâu detect.
+Hai cách bổ trợ nhau: ảnh thường thì OpenCV rẻ, xác định, nhanh (~10s, 0 chi phí model); ảnh
+dày thì chuyển sang dense ensemble vote để chịu được nhãn dính. Đọc field thì cắt-nhãn-rồi-OCR
+cho độ phủ cao nhất (time 30/31 so với 27/31 của bản Node).
