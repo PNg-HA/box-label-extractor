@@ -8,28 +8,44 @@ bạch hai khâu, và **tự động chọn phương pháp đếm theo mật đ�
 
 - **Router**: một lời gọi Bedrock rẻ (`quick_count`) ước lượng nhanh số thùng (theo nhãn
   trắng nguyên, output chỉ là con số).
-- **≤ 35 thùng** → **OpenCV detect/crop** từng nhãn rồi OCR (Textract/Bedrock) ở độ phân
-  giải gốc. Xác định, không tốn model cho khâu detect, độ phủ field cao nhất.
-- **> 35 thùng** → **phương pháp DENSE**: chia ảnh thành cột dọc, đếm mỗi cột bằng
+- **≤ 25 thùng** → **OpenCV detect/crop** từng nhãn rồi OCR (Textract/Bedrock) ở độ phân
+  giải gốc, kèm **lọc theo độ-đầy-đủ-trường** (xem dưới). Xác định, không tốn model cho khâu
+  detect, độ phủ field cao nhất.
+- **> 25 thùng** → **phương pháp DENSE**: chia ảnh thành cột dọc, đếm mỗi cột bằng
   extended thinking + **ensemble majority vote** (mọi lời gọi chạy song song), cộng các cột.
   Chịu được pallet xếp dày khi nhãn dính nhau làm OpenCV under-count.
+
+Ngưỡng mặc định **25** ưu tiên độ chính xác (nhiều ảnh dày dùng dense, đổi lại chậm hơn).
+Đổi bằng `--threshold`.
+
+### Lọc nhãn theo độ-đầy-đủ-trường (khử over-detect linh hoạt)
+
+OpenCV đôi khi detect THỪA: một mẩu giấy phụ, tem cũ, nhãn bị bút xóa, hay số in trên carton.
+Thay vì tinh chỉnh detector cho từng ảnh (vá chỗ này lòi chỗ kia), pipeline chấm điểm mỗi nhãn
+sau khi OCR: đếm số TRƯỜNG CHÍNH có giá trị (order_number, shop_name, destination, number,
+line_code, box_code, total, time, date, products). Nhãn chính thường có ≥2; nhãn phụ/bị xóa
+chỉ 0–1 → **loại**. Ngưỡng chỉnh bằng `--min-fields` (mặc định 2).
+
+Ví dụ z512641: OpenCV detect 29 (true 27) → 2 nhãn yếu bị loại (một nhãn chỉ đọc được mỗi
+`total: 29` — đó là số in trên thùng, không phải nhãn) → **còn đúng 27**.
 
 ```mermaid
 flowchart TD
     A["ảnh gốc full-res"] --> O["auto_orient (EXIF)"]
     O --> Q["quick_count (Bedrock, 1 call rẻ)"]
-    Q -->|<= 35| C["chia 3 cột dọc"]
-    Q -->|> 35| DEN["DENSE: chia cột + ensemble vote<br/>extended thinking, song song<br/>majority count mỗi cột → cộng"]
-    C --> D["detect_in_column (OpenCV)<br/>quét đa ngưỡng sáng 150..230<br/>contour ~chữ nhật/bình hành<br/>cluster-vote + merge containment"]
+    Q -->|<= 25| C["chia cột theo lỗ tròn"]
+    Q -->|> 25| DEN["DENSE: chia cột theo lỗ + ensemble vote<br/>extended thinking, song song<br/>majority count mỗi cột → cộng"]
+    C --> D["detect_in_column (OpenCV)<br/>quét đa ngưỡng sáng 150..230<br/>contour ~chữ nhật/bình hành<br/>cluster-vote + merge + tách nhãn dính"]
     D --> E["crop từng nhãn (native res)"]
     E --> F{engine}
     F -->|textract| G["Textract → dòng text thô"]
     F -->|bedrock| H["Claude Sonnet 4.6 → field JSON"]
     F -->|hybrid| I["Textract lines làm hint + Claude → field JSON"]
+    I --> FILT["lọc nhãn theo độ-đầy-đủ-trường<br/>(loại nhãn phụ / bị xóa)"]
+    G --> FILT
+    H --> FILT
     DEN --> Z["box_count + labels"]
-    G --> Z
-    H --> Z
-    I --> Z
+    FILT --> Z
 ```
 
 ## Vì sao tách detect bằng OpenCV

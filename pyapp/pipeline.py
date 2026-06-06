@@ -21,7 +21,7 @@ from detector import detect_labels
 from ocr import textract_lines, bedrock_fields
 from counter import quick_count, count_dense
 
-THRESHOLD = 35
+THRESHOLD = 25
 
 
 def crop(img, b, pad=12):
@@ -31,28 +31,74 @@ def crop(img, b, pad=12):
     return img[y0:y1, x0:x1]
 
 
-def run_opencv(img, engine, profile, max_workers=8):
-    """Current method: OpenCV detect + per-label OCR."""
+# Key fields that a MAIN delivery label should carry. A secondary slip / torn / erased label
+# typically yields only 0-1 of these. We score each detected label by how many it has and
+# drop the weak ones (handles over-detection without manual tuning of the detector).
+KEY_FIELDS = ["order_number", "shop_name", "destination", "number",
+              "line_code", "box_code", "total", "time", "date"]
+
+
+def label_score(fields: dict) -> int:
+    """Number of distinct key fields present (products array counts as one)."""
+    if not isinstance(fields, dict):
+        return 0
+    s = sum(1 for k in KEY_FIELDS if str(fields.get(k) or "").strip())
+    if fields.get("products"):
+        s += 1
+    return s
+
+
+def _fields_from_lines(lines: list[str]) -> dict:
+    """Rough structured guess from raw Textract lines, to score textract-only runs."""
+    text = "\n".join(lines)
+    import re
+    f = {}
+    if re.search(r"TO[-\s]?[A-Z]{1,3}", text):
+        f["order_number"] = "1"
+    if re.search(r"\bVC\d", text):
+        f["line_code"] = "1"
+    if re.search(r"\d{1,2}[:.]\d{2}", text):
+        f["time"] = "1"
+    if re.search(r"\b\d{1,3}\b", text):
+        f["total"] = "1"
+    if len(lines) >= 3:
+        f["shop_name"] = "1"
+    return f
+
+
+def run_opencv(img, engine, profile, max_workers=8, min_fields=2):
+    """OpenCV detect + per-label OCR, then drop labels that are not real MAIN labels
+    (too few fields = secondary slip / torn / erased label)."""
     _, boxes = detect_labels(img)
 
     def handle(b):
         c = crop(img, b)
         if engine == "textract":
-            return {"col": b["col"], "fields": {"_lines": textract_lines(c, profile)}}
+            lines = textract_lines(c, profile)
+            return {"col": b["col"], "fields": {"_lines": lines},
+                    "_score": label_score(_fields_from_lines(lines))}
         if engine == "bedrock":
-            return {"col": b["col"], "fields": bedrock_fields(c, profile)}
+            f = bedrock_fields(c, profile)
+            return {"col": b["col"], "fields": f, "_score": label_score(f)}
         lines = textract_lines(c, profile)
-        return {"col": b["col"], "fields": bedrock_fields(c, profile, ocr_hint=lines)}
+        f = bedrock_fields(c, profile, ocr_hint=lines)
+        return {"col": b["col"], "fields": f, "_score": label_score(f)}
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        labels = list(ex.map(handle, boxes))
-    for i, l in enumerate(labels, 1):
+        raw = list(ex.map(handle, boxes))
+
+    kept = [l for l in raw if l["_score"] >= min_fields]
+    dropped = len(raw) - len(kept)
+    for l in kept:
+        l.pop("_score", None)
+    for i, l in enumerate(kept, 1):
         l["index"] = i
-    return {"box_count": len(boxes), "labels": labels, "method": "opencv", "boxes": boxes}
+    return {"box_count": len(kept), "labels": kept, "method": "opencv",
+            "detected": len(boxes), "dropped_weak": dropped}
 
 
 def process(path, engine="hybrid", method="auto", threshold=THRESHOLD,
-            profile="gapv50k", annotate=False):
+            profile="gapv50k", annotate=False, min_fields=2):
     img_raw = cv2.imread(path)
     if img_raw is None:
         raise FileNotFoundError(path)
@@ -69,19 +115,9 @@ def process(path, engine="hybrid", method="auto", threshold=THRESHOLD,
         res = count_dense(img, profile=profile)
         res["method"] = "dense"
     else:
-        res = run_opencv(img, engine, profile)
+        res = run_opencv(img, engine, profile, min_fields=min_fields)
 
     res["routing"] = {"method": chosen, "quick_count": estimate, "threshold": threshold}
-
-    if annotate and chosen == "opencv":
-        vis = img.copy()
-        for b in res.get("boxes", []):
-            cv2.rectangle(vis, (b["x0"], b["y0"]), (b["x1"], b["y1"]), (0, 0, 255), 6)
-        out = os.path.splitext(os.path.basename(path))[0] + "_annotated.jpg"
-        H, W = vis.shape[:2]
-        cv2.imwrite(out, cv2.resize(vis, (W // 4, H // 4)))
-        print("annotated ->", out, file=sys.stderr)
-    res.pop("boxes", None)
     return res
 
 
@@ -92,11 +128,14 @@ def main():
     ap.add_argument("--engine", default="hybrid", choices=["textract", "bedrock", "hybrid"])
     ap.add_argument("--method", default="auto", choices=["auto", "opencv", "dense"])
     ap.add_argument("--threshold", type=int, default=THRESHOLD)
+    ap.add_argument("--min-fields", type=int, default=2, dest="min_fields",
+                    help="drop a detected label if it has fewer than this many key fields "
+                         "(secondary slip / torn / erased label)")
     ap.add_argument("--profile", default="gapv50k")
     ap.add_argument("--annotate", action="store_true")
     a = ap.parse_args()
     t0 = time.time()
-    res = process(a.image, a.engine, a.method, a.threshold, a.profile, a.annotate)
+    res = process(a.image, a.engine, a.method, a.threshold, a.profile, a.annotate, a.min_fields)
     res["seconds"] = round(time.time() - t0, 1)
     print(json.dumps(res, ensure_ascii=False, indent=2))
 
