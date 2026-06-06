@@ -18,6 +18,15 @@ test/peek.mjs
 test/debug-*.mjs
 test/*-lab.mjs
 test/*-dump.jpg
+test/ocr-*.mjs
+test/tx-*.mjs
+test/diag-*.mjs
+test/label-shape.mjs
+test/check-flags.mjs
+test/holes-percol.mjs
+test/holes2.mjs
+test/tune-holes.mjs
+test/probe-max.mjs
 
 # OS / editor
 .DS_Store
