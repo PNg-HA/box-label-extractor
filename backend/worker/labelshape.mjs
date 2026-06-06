@@ -30,7 +30,8 @@ function convexHullArea(pts){if(pts.length<3)return 0;const p=pts.slice().sort((
   const up=[];for(let i=p.length-1;i>=0;i--){const q=p[i];while(up.length>=2&&cr(up[up.length-2],up[up.length-1],q)<=0)up.pop();up.push(q);}
   const h=lo.slice(0,-1).concat(up.slice(0,-1));let a=0;for(let i=0;i<h.length;i++){const j=(i+1)%h.length;a+=h[i][0]*h[j][1]-h[j][0]*h[i][1];}return Math.abs(a)/2;}
 
-// returns { regions: [{x0,y0,x1,y1,rect}], ok: bool } with coords normalized 0..1
+// returns { intact: [...regions], torn: [...regions], ok } with coords normalized 0..1.
+// intact = rect >= RECT_MIN, torn = clearly label-sized & bright but low rectangularity.
 export async function intactLabelRegions(tileBuffer) {
   try {
     const { data, info } = await sharp(tileBuffer, { failOn: "none" })
@@ -59,13 +60,12 @@ export async function intactLabelRegions(tileBuffer) {
     }
 
     const imgArea = N;
-    const regions = [];
+    const intact = [], torn = [];
     for (const b of blobs) {
       const bw=b.maxX-b.minX+1, bh=b.maxY-b.minY+1, bbox=bw*bh;
-      if (bbox < imgArea*0.0025 || bbox > imgArea*0.06) continue;   // label-sized only
+      if (bbox < imgArea*0.0025 || bbox > imgArea*0.06) continue;
       const aspect = bw/bh;
-      if (aspect < ASPECT_LO || aspect > ASPECT_HI) continue;        // drop slivers/merged streaks
-      // fill interior holes
+      if (aspect < ASPECT_LO || aspect > ASPECT_HI) continue;
       const inside=new Uint8Array(bw*bh);
       for(const [px,py] of b.pts) inside[(py-b.minY)*bw+(px-b.minX)]=1;
       const bg=new Uint8Array(bw*bh); const st=[];
@@ -79,21 +79,27 @@ export async function intactLabelRegions(tileBuffer) {
       const hull = convexHullArea(sample) || fa;
       const solidity = Math.min(1, fa/hull);
       const rect = Math.min(extent, solidity);
-      if (rect >= RECT_MIN) {
-        regions.push({ x0:b.minX/W, y0:b.minY/H, x1:(b.maxX+1)/W, y1:(b.maxY+1)/H, rect:+rect.toFixed(2) });
-      }
+      const box = { x0:b.minX/W, y0:b.minY/H, x1:(b.maxX+1)/W, y1:(b.maxY+1)/H, rect:+rect.toFixed(2) };
+      if (rect >= RECT_MIN) intact.push(box);
+      else if (rect < RECT_MIN - 0.15) torn.push(box);   // clearly non-rectangular -> torn
     }
-    return { regions, ok: regions.length > 0 };
+    return { intact, torn, ok: (intact.length + torn.length) > 0 };
   } catch (e) {
-    return { regions: [], ok: false };
+    return { intact: [], torn: [], ok: false };
   }
 }
 
-// keep only OCR lines whose center lies inside an intact-label region (with small padding)
-export function filterLinesByRegions(linesWithGeom, regions, pad = 0.01) {
-  if (!regions || !regions.length) return linesWithGeom; // no reliable regions -> don't filter
+// Drop OCR lines whose center sits on a region detected as TORN (and NOT on any intact
+// region). Conservative: when in doubt we KEEP the line (only proven-torn text is removed),
+// so we never lose good fields just because a label region wasn't detected.
+export function dropTornLines(linesWithGeom, intact, torn, pad = 0.005) {
+  if (!torn || !torn.length) return linesWithGeom;
+  const inBox = (cx, cy, b) => cx >= b.x0 - pad && cx <= b.x1 + pad && cy >= b.y0 - pad && cy <= b.y1 + pad;
   return linesWithGeom.filter(l => {
     const cx = l.left + l.width / 2, cy = l.top + l.height / 2;
-    return regions.some(r => cx >= r.x0 - pad && cx <= r.x1 + pad && cy >= r.y0 - pad && cy <= r.y1 + pad);
+    const onTorn = torn.some(b => inBox(cx, cy, b));
+    if (!onTorn) return true;                          // not on a torn region -> keep
+    const onIntact = (intact || []).some(b => inBox(cx, cy, b));
+    return onIntact;                                   // on torn but also intact -> keep; pure torn -> drop
   });
 }

@@ -3,7 +3,7 @@ import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3
 import sharp from "sharp";
 import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
 import { ocrLinesWithGeom, sortLines } from "./textract.mjs";
-import { intactLabelRegions, filterLinesByRegions } from "./labelshape.mjs";
+import { intactLabelRegions, dropTornLines } from "./labelshape.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
 const BEDROCK_REGION = process.env.BEDROCK_REGION || REGION;
@@ -117,7 +117,7 @@ function decideGrid(width, height, holeCount) {
   return { cols, rows };
 }
 
-// Preprocess one column crop: contrast normalize + sharpen for crisper small text.
+// Preprocess one column crop for the LLM: cap to a budget Claude can handle.
 async function makeColumnTile(oriented, left, top, w, h) {
   return sharp(oriented)
     .extract({ left, top, width: w, height: h })
@@ -126,6 +126,26 @@ async function makeColumnTile(oriented, left, top, w, h) {
     .sharpen({ sigma: 1.0 })
     .jpeg({ quality: 95 })
     .toBuffer();
+}
+
+// Crop for Textract OCR. Textract needs the PRINT to stay large enough; for tall narrow
+// columns the binding dimension is WIDTH (constraining height shrinks width and kills OCR).
+// So we cap WIDTH only (don't enlarge, cap ~1800) and never constrain height; then back off
+// quality if needed to stay under the 5MB sync limit.
+async function makeOcrTile(oriented, left, top, w, h) {
+  const targetW = Math.min(w, 1800);
+  let q = 88;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const buf = await sharp(oriented)
+      .extract({ left, top, width: w, height: h })
+      .resize({ width: targetW, withoutEnlargement: true })   // width only — keep print legible
+      .jpeg({ quality: q })
+      .toBuffer();
+    if (buf.length <= 4_800_000) return buf;
+    q -= 12;
+  }
+  return sharp(oriented).extract({ left, top, width: w, height: h })
+    .resize({ width: 1400, withoutEnlargement: true }).jpeg({ quality: 62 }).toBuffer();
 }
 
 async function buildTiles(buffer) {
@@ -164,6 +184,7 @@ async function buildTiles(buffer) {
 
   const tileH = Math.floor(H / rows);
   const tiles = [];
+  const ocrTiles = [];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const left = xEdges[c];
@@ -171,9 +192,10 @@ async function buildTiles(buffer) {
       const w = xEdges[c + 1] - left;
       const h = (r === rows - 1) ? (H - top) : tileH;
       tiles.push(await makeColumnTile(oriented, left, top, w, h));
+      ocrTiles.push(await makeOcrTile(oriented, left, top, w, h));
     }
   }
-  return { tiles, cols, rows, cutSource };
+  return { tiles, ocrTiles, cols, rows, cutSource };
 }
 
 // Confident column split = each cut sits in a real GAP (few/no holes near it) and each
@@ -325,14 +347,14 @@ export const handler = async (event) => {
     const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
     const buffer = await streamToBuffer(obj.Body);
 
-    const { tiles, cols, rows, cutSource } = await buildTiles(buffer);
+    const { tiles, ocrTiles, cols, rows, cutSource } = await buildTiles(buffer);
 
-    // Textract OCR each column tile (raw, accurate characters). To avoid pulling text off
-    // TORN / partial / secondary labels, we detect INTACT (rectangular ~>=65%) white-label
-    // regions by image processing and keep only OCR lines whose center lies on an intact label.
-    const ocrPerTile = await Promise.all(tiles.map(async (t) => {
+    // Textract OCR each column on a HIGH-RES crop (small print needs resolution — the shrunk
+    // LLM tile returns almost no text). Detect intact-label regions on the SAME crop so the
+    // OCR-line coordinates align, then DROP only text on regions proven to be TORN.
+    const ocrPerTile = await Promise.all(ocrTiles.map(async (t) => {
       const [linesGeom, shape] = await Promise.all([ ocrLinesWithGeom(t), intactLabelRegions(t) ]);
-      const kept = filterLinesByRegions(linesGeom, shape.regions);
+      const kept = dropTornLines(linesGeom, shape.intact, shape.torn);
       return sortLines(kept);
     }));
 
