@@ -5,6 +5,7 @@ import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
 import { ocrLinesWithGeom, sortLines } from "./textract.mjs";
 import { intactLabelRegions, dropTornLines } from "./labelshape.mjs";
 import { backfillColumn } from "./backfill.mjs";
+import { reconcileFields } from "./reconcile.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
 const BEDROCK_REGION = process.env.BEDROCK_REGION || REGION;
@@ -450,6 +451,11 @@ export const handler = async (event) => {
     const merged = [];
     for (const labels of colLabels) for (const l of labels) merged.push({ fields: l.fields || {} });
     merged.forEach((l, i) => { l.index = i + 1; });
+
+    // CROSS-LABEL RECONCILIATION: within this one image, the same shop maps to the same
+    // order_number / box_code. Fill blanks from the batch consensus (no model calls, fills
+    // only, never overrides). This mirrors the human pattern-reasoning across siblings.
+    try { reconcileFields(merged); } catch (_) { /* never break */ }
 
     const boxCount = merged.length;
     const holeCount = holesPerCol.reduce((a, h) => a + (h || 0), 0);
