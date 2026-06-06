@@ -191,16 +191,15 @@ async function buildTiles(buffer) {
   return { tiles, ocrTiles, cols, rows, cutSource };
 }
 
-// OCR crop for ONE column at NATIVE resolution (no downscale — Textract reads small print best
-// at full res). Only re-encode quality if a single column somehow exceeds Textract's 5MB sync
-// limit (rare; a column is normally ~1MB).
+// OCR crop for ONE column at NATIVE resolution. Measured to read the most small-print lines
+// while staying under Textract's 5MB sync limit (a column is normally ~1MB). Quality backs off
+// only if a column would exceed the limit.
 async function makeOcrColumn(oriented, left, top, w, h) {
-  for (const q of [92, 85, 75, 65]) {
+  for (const q of [95, 88, 78, 68]) {
     const buf = await sharp(oriented).extract({ left, top, width: w, height: h }).jpeg({ quality: q }).toBuffer();
     if (buf.length <= 4_900_000) return buf;
   }
-  // extreme fallback: cap width
-  return sharp(oriented).extract({ left, top, width: w, height: h }).resize({ width: 2400 }).jpeg({ quality: 80 }).toBuffer();
+  return sharp(oriented).extract({ left, top, width: w, height: h }).resize({ width: 2400 }).jpeg({ quality: 75 }).toBuffer();
 }
 
 // Confident column split = each cut sits in a real GAP (few/no holes near it) and each
@@ -276,7 +275,7 @@ function ocrBlock(ocr) {
   const lines = ocr.slice(0, 400);
   return `
 
-OCR REFERENCE (from Amazon Textract, read top-to-bottom). These are the exact characters detected on this crop — trust them for spelling/digits when a field is hard to read in the image (e.g. order numbers start with "TO-", codes like "VC9-B"). Do NOT use this list to change the BOX COUNT; count boxes from the image as instructed. Use it only to read field VALUES more accurately:
+OCR REFERENCE (from Amazon Textract, read top-to-bottom). These are the exact characters detected on this crop — trust them for spelling/digits when a field is hard to read in the image (e.g. order numbers start with "TO-", codes like "VC9-B"). The OCR may contain noise: a time may appear as "13.32/09/" or "0.10" — normalise such values to HH:MM:SS (e.g. 13:32:09) using the image. If a label clearly shows a value but it is missing/garbled in this OCR list, still read it from the image. Do NOT use this list to change the BOX COUNT; count boxes from the image. Use it only to read field VALUES more accurately:
 <<<OCR
 ${lines.join("\n")}
 OCR>>>`;
