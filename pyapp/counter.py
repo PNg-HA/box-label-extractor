@@ -128,16 +128,34 @@ def _pick(runs: list[dict], count: int) -> list[dict]:
 
 def count_dense(img_bgr: np.ndarray, columns: int = 3, votes: int = VOTES,
                 profile: str = "gapv50k", max_workers: int = 4) -> dict:
-    """Column tiling + ensemble vote counting. Returns {box_count, labels, per_column}."""
+    """Column tiling + ensemble vote counting. Returns {box_count, labels, per_column}.
+
+    Column boundaries are taken from where the viewing HOLES cluster horizontally (real gaps
+    between columns), falling back to an even 1/N split when the hole signal is too weak.
+    A blind even split slices a box straddling the boundary into two columns -> over-count.
+    """
     from detector import auto_orient
+    from holes import detect_hole_xs, column_cuts_from_holes
     img = auto_orient(img_bgr)
     H, W = img.shape[:2]
-    tile_w = W // columns
+
+    # derive column edges (fractions of width) from holes; fall back to even split
+    cut_source = "holes"
+    try:
+        xs = detect_hole_xs(img)
+        cuts = column_cuts_from_holes(xs, columns)
+    except Exception:
+        cuts = None
+    if not cuts:
+        cut_source = "even"
+        cuts = [(i + 1) / columns for i in range(columns - 1)]
+    edges = [0.0] + list(cuts) + [1.0]
+
     cols = []
     for c in range(columns):
-        left = c * tile_w
-        w = (W - left) if c == columns - 1 else tile_w
-        cols.append(img[:, left:left + w])
+        left = int(round(edges[c] * W))
+        right = int(round(edges[c + 1] * W))
+        cols.append(img[:, left:right])
 
     # fire EVERY (column x vote) call in parallel
     jobs = [(ci, cols[ci]) for ci in range(columns) for _ in range(votes)]
@@ -167,4 +185,5 @@ def count_dense(img_bgr: np.ndarray, columns: int = 3, votes: int = VOTES,
 
     for i, l in enumerate(all_labels, 1):
         l["index"] = i
-    return {"box_count": total, "labels": all_labels, "per_column": per_column}
+    return {"box_count": total, "labels": all_labels, "per_column": per_column,
+            "cut_source": cut_source}

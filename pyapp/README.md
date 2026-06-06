@@ -82,8 +82,9 @@ Output:
 
 | File | Vai trò |
 |------|---------|
-| `detector.py` | OpenCV: `auto_orient`, `detect_in_column` (quét đa ngưỡng + cluster-vote + merge containment), `detect_labels` (3 cột) |
-| `counter.py` | `quick_count` (router) + `count_dense` (chia cột + ensemble vote + extended thinking) |
+| `detector.py` | OpenCV: `auto_orient`, `detect_in_column` (quét đa ngưỡng + cluster-vote + merge containment), `detect_labels` (cắt cột theo lỗ) |
+| `counter.py` | `quick_count` (router) + `count_dense` (cắt cột theo lỗ + ensemble vote + extended thinking) |
+| `holes.py` | phát hiện lỗ tròn (OpenCV) + `column_cuts_from_holes` (k-means 1D trên toạ-độ-X lỗ → ranh giới cột) |
 | `ocr.py` | `textract_lines`, `bedrock_fields` (Claude Sonnet 4.6), upscale crop trước khi OCR |
 | `pipeline.py` | router theo ngưỡng → opencv/dense, `ThreadPoolExecutor`, CLI, `--annotate` |
 | `batch_detect.py` | benchmark detection OpenCV thuần vs ground-truth |
@@ -93,6 +94,26 @@ Output:
 | `tune.py` | quét tham số detector |
 
 ## Hiệu năng
+
+### Cắt cột theo LỖ TRÒN (cải tiến quan trọng)
+
+Cả hai nhánh không còn cắt cột cứng 1/N. `holes.py` phát hiện các lỗ tròn (ngưỡng sáng thích
+ứng + closing + kiểm tra độ tròn), rồi k-means 1D trên toạ-độ-X của lỗ để tìm ranh giới cột
+THẬT, fallback về chia đều khi tín hiệu lỗ yếu. Cắt cứng 1/3 cắt ngang thùng nằm trên ranh
+giới → đếm gấp đôi. Ví dụ z609303 ranh giới thật là 0.333/0.569 (cột phải rộng hơn), không
+phải 0.333/0.667.
+
+Tác động (đo được):
+
+| ảnh | thật | trước (cắt đều) | sau (cắt theo lỗ) |
+|-----|----:|----:|----:|
+| z…609303 (dense) | 42 | 48 (+6) | **43 (+1)** |
+| z…512641 (opencv) | 27 | 30 (+3) | **27 (0)** |
+| z…634118 (detect) | 45 | 34 | **45 (0)** |
+| z…505382 (detect) | 45 | 29 | 40 |
+| z…611275 (detect) | 40 | 28 | 41 |
+
+Detection thuần (OpenCV, không OCR) trên cả 12 ảnh: tổng sai số tuyệt đối **50 → 18**.
 
 ### Đếm end-to-end CÓ ROUTING (`python batch_count.py 35`)
 

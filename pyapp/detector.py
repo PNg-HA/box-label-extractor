@@ -112,16 +112,27 @@ def detect_in_column(col_bgr: np.ndarray,
 def detect_labels(img_bgr: np.ndarray, columns: int = 3, **kw):
     """
     Detect labels across the whole (oriented) image, split into `columns` vertical strips.
+    Column boundaries follow where the viewing HOLES cluster (real gaps between columns),
+    falling back to an even 1/N split when the hole signal is too weak. An even split can
+    slice a box straddling the boundary into both columns -> over-count.
     Returns a list of dicts: {col, x0,y0,x1,y1} in FULL-image pixel coords, top-to-bottom.
     """
     img = auto_orient(img_bgr)
     H, W = img.shape[:2]
-    tile_w = W // columns
+
+    try:
+        from holes import detect_hole_xs, column_cuts_from_holes
+        cuts = column_cuts_from_holes(detect_hole_xs(img), columns)
+    except Exception:
+        cuts = None
+    edges = [0.0] + list(cuts) + [1.0] if cuts else [i / columns for i in range(columns + 1)]
+
     out = []
     for c in range(columns):
-        left = c * tile_w
-        w = (W - left) if c == columns - 1 else tile_w
-        col = img[:, left:left + w]
+        left = int(round(edges[c] * W))
+        right = int(round(edges[c + 1] * W))
+        col = img[:, left:right]
         for (x0, y0, x1, y1) in detect_in_column(col, **kw):
             out.append({"col": c, "x0": left + x0, "y0": y0, "x1": left + x1, "y1": y1})
     return img, out
+
