@@ -4,6 +4,7 @@ import sharp from "sharp";
 import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
 import { ocrLinesWithGeom, sortLines } from "./textract.mjs";
 import { intactLabelRegions, dropTornLines } from "./labelshape.mjs";
+import { backfillColumn } from "./backfill.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
 const BEDROCK_REGION = process.env.BEDROCK_REGION || REGION;
@@ -275,7 +276,14 @@ function ocrBlock(ocr) {
   const lines = ocr.slice(0, 400);
   return `
 
-OCR REFERENCE (from Amazon Textract, read top-to-bottom). These are the exact characters detected on this crop — trust them for spelling/digits when a field is hard to read in the image (e.g. order numbers start with "TO-", codes like "VC9-B"). The OCR may contain noise: a time may appear as "13.32/09/" or "0.10" — normalise such values to HH:MM:SS (e.g. 13:32:09) using the image. If a label clearly shows a value but it is missing/garbled in this OCR list, still read it from the image. Do NOT use this list to change the BOX COUNT; count boxes from the image. Use it only to read field VALUES more accurately:
+OCR REFERENCE (from Amazon Textract, read top-to-bottom). These are the exact characters detected on this crop — trust them for spelling/digits when a field is hard to read in the image (e.g. order numbers start with "TO-", codes like "VC9-B"). The OCR may contain noise: a time may appear as "13.32/09/" or "0.10" — normalise such values to HH:MM:SS (e.g. 13:32:09) using the image.
+
+CRITICAL — DO NOT DROP FIELDS THAT THE OCR PROVES ARE PRESENT:
+- Every "TO-..." token in the OCR is an order_number. Assign each to the correct box (top-to-bottom order). Do NOT leave order_number empty for a box whose region shows a TO- code.
+- The word "TOTAL" (or "QTT"/"QTY") in the OCR is followed by the total quantity number — fill "total" for that box from the number next to TOTAL.
+- Every HH:MM(:SS) token in the OCR is a "time" for the box at that position — fill it.
+- These labels are PRE-PRINTED forms: when one box on this column shows time/total/order, the others almost always do too. If you skipped one, look again at the image at that position.
+If a label clearly shows a value but it is missing/garbled in this OCR list, still read it from the image. Do NOT use this list to change the BOX COUNT; count boxes from the image. Use it only to read field VALUES more accurately and COMPLETELY:
 <<<OCR
 ${lines.join("\n")}
 OCR>>>`;
@@ -356,9 +364,11 @@ export const handler = async (event) => {
     // OCR each column at NATIVE resolution with Textract (per-column native crops read small
     // print far better than one downscaled full image). Detect intact-label regions on the same
     // crop, drop OCR lines proven to sit on a torn label, then sort top-to-bottom.
-    const ocrPerTile = await Promise.all(ocrTiles.map(async (t) => {
+    const ocrGeomPerTile = [];
+    const ocrPerTile = await Promise.all(ocrTiles.map(async (t, idx) => {
       const [linesGeom, shape] = await Promise.all([ ocrLinesWithGeom(t), intactLabelRegions(t) ]);
       const kept = dropTornLines(linesGeom, shape.intact, shape.torn);
+      ocrGeomPerTile[idx] = kept;         // keep geometry for deterministic backfill (index-aligned)
       return sortLines(kept);
     }));
 
@@ -428,6 +438,12 @@ export const handler = async (event) => {
           }
         }
       }
+    }
+
+    // DETERMINISTIC BACKFILL: fill order_number / time / total left blank by the model,
+    // using the Textract geometry we already have for each column (no extra model calls).
+    for (let i = 0; i < colLabels.length; i++) {
+      try { backfillColumn(colLabels[i], ocrGeomPerTile[i]); } catch (_) { /* never break */ }
     }
 
     // assemble final labels
