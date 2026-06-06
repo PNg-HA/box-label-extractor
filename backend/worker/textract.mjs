@@ -28,21 +28,30 @@ export async function ocrLinesWithGeom(tileBuffer) {
   }
 }
 
-// OCR the FULL image once. Textract works at full resolution (no 1568px LLM limit), so we do
-// NOT tile or rescale for OCR — we just keep the original under Textract's 10MB sync limit.
-// Returns geom lines with coords normalized 0..1 (so we can slice them per column afterwards).
+// OCR the FULL image once. Textract's synchronous DetectDocumentText has a 5 MB limit on the
+// image bytes, so we keep the ORIGINAL RESOLUTION but drop JPEG quality (and only downscale as
+// a last resort) to fit under 5 MB. Returns geom lines with coords normalized 0..1.
+const TX_SYNC_LIMIT = 4_900_000;   // a touch under Textract's 5 MB sync cap
 export async function ocrFullImage(orientedBuffer) {
   try {
     let buf = orientedBuffer;
-    // keep under the 10MB sync cap; only down-quality if needed (avoid resizing if possible)
-    if (buf.length > 9_500_000) {
-      buf = await sharp(orientedBuffer).jpeg({ quality: 85 }).toBuffer();
-      if (buf.length > 9_500_000) {
+    if (buf.length > TX_SYNC_LIMIT) {
+      // try progressively lower quality first (keeps full resolution -> best for OCR)
+      for (const q of [85, 75, 65]) {
+        buf = await sharp(orientedBuffer).jpeg({ quality: q }).toBuffer();
+        if (buf.length <= TX_SYNC_LIMIT) break;
+      }
+      // still too big -> cap width, keep decent quality
+      if (buf.length > TX_SYNC_LIMIT) {
         const meta = await sharp(orientedBuffer).metadata();
-        buf = await sharp(orientedBuffer).resize({ width: Math.min(meta.width, 4000) }).jpeg({ quality: 88 }).toBuffer();
+        for (const wid of [4000, 3400, 2800]) {
+          if (wid >= (meta.width || wid)) continue;
+          buf = await sharp(orientedBuffer).resize({ width: wid }).jpeg({ quality: 82 }).toBuffer();
+          if (buf.length <= TX_SYNC_LIMIT) break;
+        }
       }
     }
-    return await ocrLinesWithGeom(buf);   // already normalized 0..1
+    return await ocrLinesWithGeom(buf);   // coords already normalized 0..1
   } catch (e) {
     return [];
   }
