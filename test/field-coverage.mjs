@@ -39,25 +39,33 @@ async function runOne(filename) {
 const entries = Object.entries(GROUND_TRUTH);
 const settled = await Promise.all(entries.map(async ([f, truth]) => ({ f, truth, ...(await runOne(f).catch(e => ({ error: String(e.message || e) }))) })));
 
-console.log("\n========= FIELD COVERAGE (core fields per label) =========");
-let totLabels = 0;
-const totCore = Object.fromEntries(CORE.map(k => [k, 0]));
-let totFilled = 0, totCells = 0;
+// A field is APPLICABLE to an image only if the label TYPE in that image carries it.
+// Heuristic: applicable when at least 30% of the image's labels have the field (and >=2).
+// Images whose labels never print a field (e.g. export VC35 labels have no order/total)
+// are EXCLUDED from that field's denominator so they don't unfairly drag the KPI down.
+const APPLICABLE_FRAC = 0.30;
+
+console.log("\n========= FIELD COVERAGE (applicability-aware) =========");
+const agg = Object.fromEntries(CORE.map(k => [k, { have: 0, of: 0, naImgs: [] }]));
 for (const s of settled) {
   if (s.error) { console.log(`✗ ${s.f}: ERROR ${s.error}`); continue; }
-  const L = s.labels;
-  totLabels += L.length;
+  const L = s.labels, n = L.length;
   const per = {};
-  for (const k of CORE) {
-    const n = L.filter(l => l.fields && String(l.fields[k] ?? "").trim()).length;
-    per[k] = n; totCore[k] += n;
-    totFilled += n; totCells += L.length;
-  }
-  const pct = (per_k) => `${per_k}/${L.length}`;
-  console.log(`${s.f}  boxes=${L.length}`);
-  console.log("   " + CORE.map(k => `${k}=${pct(per[k])}`).join("  "));
+  for (const k of CORE) per[k] = L.filter(l => l.fields && String(l.fields[k] ?? "").trim()).length;
+  console.log(`${s.f}  boxes=${n}`);
+  console.log("   " + CORE.map(k => {
+    const applicable = per[k] >= Math.max(2, Math.ceil(n * APPLICABLE_FRAC));
+    if (applicable) { agg[k].have += per[k]; agg[k].of += n; return `${k}=${per[k]}/${n}`; }
+    else { agg[k].naImgs.push(s.f); return `${k}=n/a`; }
+  }).join("  "));
 }
 console.log("==========================================================");
-console.log("TOTAL labels:", totLabels);
-for (const k of CORE) console.log(`  ${k.padEnd(13)} ${totCore[k]}/${totLabels}  (${(100*totCore[k]/totLabels).toFixed(1)}%)`);
-console.log(`  OVERALL core-field fill: ${totFilled}/${totCells} = ${(100*totFilled/totCells).toFixed(2)}%`);
+console.log("Coverage counted ONLY on images whose label type carries the field:");
+for (const k of CORE) {
+  const a = agg[k];
+  const pct = a.of ? (100 * a.have / a.of).toFixed(1) : "—";
+  console.log(`  ${k.padEnd(13)} ${a.have}/${a.of}  (${pct}%)   ${a.naImgs.length ? "n/a in " + a.naImgs.length + " img" : ""}`);
+}
+const totHave = CORE.reduce((s, k) => s + agg[k].have, 0);
+const totOf = CORE.reduce((s, k) => s + agg[k].of, 0);
+console.log(`  OVERALL (applicable only): ${totHave}/${totOf} = ${(100 * totHave / totOf).toFixed(2)}%`);
