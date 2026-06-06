@@ -54,6 +54,25 @@ export function reconcileFields(labels) {
   // shop_name -> box_code (carton type is stable per shop within a batch)
   const shopToBox = consensusMap(labels, "shop_name", "box_code");
 
+  // Detect the batch's line_code suffix pattern: line_code is usually box_code + a suffix
+  // (e.g. "VC9" -> "VC9-B"). Learn the dominant suffix from labels that have BOTH, then we can
+  // fill a blank line_code from its box_code. Only applied if a clear suffix exists.
+  let suffix = null;
+  {
+    const sfx = new Map();
+    for (const l of labels) {
+      const bc = String(l.fields?.box_code ?? "").trim().toUpperCase().replace(/\s+/g, "");
+      const lc = String(l.fields?.line_code ?? "").trim().toUpperCase().replace(/\s+/g, "");
+      if (bc && lc && lc.startsWith(bc)) {
+        const s = lc.slice(bc.length);            // e.g. "-B"
+        sfx.set(s, (sfx.get(s) || 0) + 1);
+      }
+    }
+    let bestC = 0, second = 0;
+    for (const [s, c] of sfx) { if (c > bestC) { second = bestC; suffix = s; bestC = c; } else if (c > second) second = c; }
+    if (!(bestC >= 3 && bestC > second)) suffix = null;   // need a clear, repeated pattern
+  }
+
   for (const l of labels) {
     const f = l.fields || (l.fields = {});
     const shop = norm(f.shop_name);
@@ -70,6 +89,11 @@ export function reconcileFields(labels) {
     }
     if (!String(f.box_code ?? "").trim() && shop && shopToBox.has(shop)) {
       f.box_code = shopToBox.get(shop); filled++;
+    }
+    // fill blank line_code from box_code using the learned batch suffix
+    if (suffix != null && !String(f.line_code ?? "").trim()) {
+      const bc = String(f.box_code ?? "").trim();
+      if (bc) { f.line_code = bc + suffix; filled++; }
     }
   }
   return { filled };
