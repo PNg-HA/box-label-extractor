@@ -1,4 +1,5 @@
 import { TextractClient, DetectDocumentTextCommand } from "@aws-sdk/client-textract";
+import sharp from "sharp";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
 const textract = new TextractClient({ region: REGION, maxAttempts: 6 });
@@ -22,6 +23,26 @@ export async function ocrLinesWithGeom(tileBuffer) {
         width: b.Geometry?.BoundingBox?.Width ?? 0,
         height: b.Geometry?.BoundingBox?.Height ?? 0,
       }));
+  } catch (e) {
+    return [];
+  }
+}
+
+// OCR the FULL image once. Textract works at full resolution (no 1568px LLM limit), so we do
+// NOT tile or rescale for OCR — we just keep the original under Textract's 10MB sync limit.
+// Returns geom lines with coords normalized 0..1 (so we can slice them per column afterwards).
+export async function ocrFullImage(orientedBuffer) {
+  try {
+    let buf = orientedBuffer;
+    // keep under the 10MB sync cap; only down-quality if needed (avoid resizing if possible)
+    if (buf.length > 9_500_000) {
+      buf = await sharp(orientedBuffer).jpeg({ quality: 85 }).toBuffer();
+      if (buf.length > 9_500_000) {
+        const meta = await sharp(orientedBuffer).metadata();
+        buf = await sharp(orientedBuffer).resize({ width: Math.min(meta.width, 4000) }).jpeg({ quality: 88 }).toBuffer();
+      }
+    }
+    return await ocrLinesWithGeom(buf);   // already normalized 0..1
   } catch (e) {
     return [];
   }
