@@ -2,7 +2,7 @@ import { BedrockRuntimeClient, ConverseStreamCommand } from "@aws-sdk/client-bed
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import sharp from "sharp";
 import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
-import { ocrFullImage, sortLines } from "./textract.mjs";
+import { ocrLinesWithGeom, sortLines } from "./textract.mjs";
 import { intactLabelRegions, dropTornLines } from "./labelshape.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
@@ -177,7 +177,7 @@ async function buildTiles(buffer) {
 
   const tileH = Math.floor(H / rows);
   const tiles = [];
-  const colRanges = [];   // normalized [x0,x1] of each column, for slicing full-image OCR
+  const ocrTiles = [];    // per-column NATIVE-resolution crops for Textract (sharp print = better OCR)
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const left = xEdges[c];
@@ -185,10 +185,22 @@ async function buildTiles(buffer) {
       const w = xEdges[c + 1] - left;
       const h = (r === rows - 1) ? (H - top) : tileH;
       tiles.push(await makeColumnTile(oriented, left, top, w, h));
-      colRanges.push({ x0: left / W, x1: (left + w) / W });
+      ocrTiles.push(await makeOcrColumn(oriented, left, top, w, h));
     }
   }
-  return { tiles, colRanges, cols, rows, cutSource, oriented };
+  return { tiles, ocrTiles, cols, rows, cutSource };
+}
+
+// OCR crop for ONE column at NATIVE resolution (no downscale — Textract reads small print best
+// at full res). Only re-encode quality if a single column somehow exceeds Textract's 5MB sync
+// limit (rare; a column is normally ~1MB).
+async function makeOcrColumn(oriented, left, top, w, h) {
+  for (const q of [92, 85, 75, 65]) {
+    const buf = await sharp(oriented).extract({ left, top, width: w, height: h }).jpeg({ quality: q }).toBuffer();
+    if (buf.length <= 4_900_000) return buf;
+  }
+  // extreme fallback: cap width
+  return sharp(oriented).extract({ left, top, width: w, height: h }).resize({ width: 2400 }).jpeg({ quality: 80 }).toBuffer();
 }
 
 // Confident column split = each cut sits in a real GAP (few/no holes near it) and each
@@ -340,23 +352,16 @@ export const handler = async (event) => {
     const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
     const buffer = await streamToBuffer(obj.Body);
 
-    const { tiles, colRanges, cols, rows, cutSource, oriented } = await buildTiles(buffer);
+    const { tiles, ocrTiles, cols, rows, cutSource } = await buildTiles(buffer);
 
-    // OCR the FULL image ONCE at native resolution (Textract has no 1568px limit). Detect
-    // intact-label regions on the full image, drop OCR lines on torn labels, then slice the
-    // surviving lines into each column by X so every column gets its own OCR reference.
-    const [fullLines, fullShape] = await Promise.all([
-      ocrFullImage(oriented),
-      intactLabelRegions(oriented),
-    ]);
-    const keptLines = dropTornLines(fullLines, fullShape.intact, fullShape.torn);
-    const ocrPerTile = colRanges.map(({ x0, x1 }) => {
-      const inCol = keptLines.filter(l => {
-        const cx = l.left + l.width / 2;
-        return cx >= x0 - 0.01 && cx <= x1 + 0.01;
-      });
-      return sortLines(inCol);
-    });
+    // OCR each column at NATIVE resolution with Textract (per-column native crops read small
+    // print far better than one downscaled full image). Detect intact-label regions on the same
+    // crop, drop OCR lines proven to sit on a torn label, then sort top-to-bottom.
+    const ocrPerTile = await Promise.all(ocrTiles.map(async (t) => {
+      const [linesGeom, shape] = await Promise.all([ ocrLinesWithGeom(t), intactLabelRegions(t) ]);
+      const kept = dropTornLines(linesGeom, shape.intact, shape.torn);
+      return sortLines(kept);
+    }));
 
     // ENSEMBLE + per-column hole cross-check: fire every tile × every vote in parallel,
     // and detect holes on each column tile (reference signal, per column).
