@@ -136,6 +136,21 @@ Tham số env của `gapv-label-worker`:
 `MODEL_ID`, `THINKING_BUDGET` (16000), `MAX_TOKENS` (48000), `TILE_TARGET_PX` (1500),
 `VOTES` (3), `CROSSCHECK_TOL` (0.2).
 
+## Phương án thay thế: Python + OpenCV (`pyapp`)
+
+Một dự án Python **độc lập** ở thư mục `pyapp/`: dùng **OpenCV thật** phát hiện + cắt từng
+nhãn, rồi OCR bằng Textract/Bedrock (cùng Claude Sonnet 4.6). So sánh hai cách:
+
+| | Node `app` (sharp + Bedrock) | Python `pyapp` (OpenCV + Textract/Bedrock) |
+|---|---|---|
+| Đếm thùng | Claude đếm theo cột (tiling + ensemble vote + thinking) — **10–11/12 đúng** | OpenCV detect nhãn (xác định, 0 chi phí model) — **3/12 exact**, tốt ảnh hi-res, yếu ảnh dày |
+| Xử lý ảnh | `sharp` (xấp xỉ) | OpenCV thật (threshold sweep + contour + morphology) |
+| OCR field | Bedrock + Textract hint ở mức **cột** — time ~27/31 | OCR ở mức **từng nhãn** native res — **time 30/31, order 30/31** |
+| Triển khai | Lambda + API Gateway + web (online) | CLI local |
+
+Bản Node mạnh ở **đếm thùng**; bản Python mạnh ở **đọc field từng nhãn** và không tốn model
+cho khâu detect. Chi tiết + benchmark đầy đủ: [`pyapp/README.md`](pyapp/README.md).
+
 ## Cập nhật lại (redeploy)
 
 ```powershell

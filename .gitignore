@@ -36,3 +36,9 @@ Thumbs.db
 # local env
 .env
 *.local
+
+# python pipeline artifacts
+pyapp/__pycache__/
+**/__pycache__/
+pyapp/*_annotated.jpg
+*.pyc
