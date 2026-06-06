@@ -50,20 +50,30 @@ DO NOT count / DO NOT create entries for:
 
 METHOD: Go layer by layer from the top. For each layer, confirm it is a real box (hole and/or label visible) and record its main label. Boxes stacked tightly can look merged — separate them by their individual holes/labels. Do NOT skip a faint-but-real box, and do NOT invent boxes that are not there.
 
-For each box, read ALL printed text on its main label as key/value pairs. Use consistent snake_case keys (examples that may appear: shop_name, destination, product_name, product_code, order_number, weight, net_weight, quantity, lot, batch, date, line_code, number, barcode, total). Only include fields that actually appear. Read numbers/codes exactly (keep decimals like 1.26, codes like VC11.2).
+For each box, read its main label. RETURN A FIXED SET OF FIELDS with EXACTLY these key names (use the SAME keys for every box; leave a key out only if that value is truly not on the label). Do NOT invent new key spellings like product_1 / product_name_1 — products go in the "products" array described below.
 
-BOX CODE (important): Each cardboard box has a large code PRINTED ON THE CARTON itself (not on the paper label), in the form "VCx" — e.g. VC9, VC11.2, VC7.5, VC4.2. This is the box type. ALWAYS record it in a field named "box_code" with the exact value you see printed on the cardboard (e.g. "box_code": "VC9"). This carton code is usually large and clear, so read it carefully. Note: the small paper label may also show a similar "line_code" (often the same code with a "-B" suffix, e.g. VC9-B); read line_code too if visible, but box_code (the carton print) is the authoritative box type and must be filled whenever the carton code is legible.
+Top-level fields per box (snake_case, fixed):
+- shop_name        : shop/branch name with NO comma (e.g. ".HA NOI DC", "HN-RETAIL")
+- destination      : full address that CONTAINS A COMMA (e.g. "HN-27 Cổ Linh, LB, Hà Nội")
+- order_number     : shipment code, starts with "TO-" (letter O, not TD/T0), e.g. "TO-DL-26-074028"
+- number           : the small line number like "1.1", "12.1"
+- date             : the date/batch date if shown (e.g. "D23021", "02/2025")
+- time             : time stamp if shown (e.g. "13:32:14")
+- lot              : lot/batch code if shown
+- line_code        : code on the paper label, often with -B suffix (e.g. "VC9-B", "VC11.2-B")
+- box_code         : the large code PRINTED ON THE CARTON (e.g. "VC9", "VC11.2") — see BOX CODE below
+- total            : the TOTAL quantity number on the label
+- products         : an ARRAY (see below); omit if the label lists no products
 
-FIELD RULES (follow exactly):
-- order_number: the shipment code on the label. It starts with "TO-" (e.g. "TO-DL-26-074028"). Read the prefix as TO (letter O), not TD/T0. Record in "order_number".
-- shop_name vs destination — decide by COMMAS:
-  * If the place text contains a COMMA (it is a full address, e.g. "HN-VinCom Plaza LB, Hà Nội" or "HN-27 Cổ Linh, LB, Hà Nội"), put it in "destination".
-  * If the place text has NO comma (just a shop/branch name, e.g. ".HA NOI DC", ".HN TRUNG HOA", ".HN-THANH CONG", "HN - XA DAN", "HN-RETAIL"), put it in "shop_name" (NOT destination).
-  * A label may have a shop_name line and a separate destination address line — keep both if both appear.
-- Read every printed field you can see; labels are dense, so look carefully and do not drop fields.
+Each element of "products" is an object with these fixed keys (include only those present):
+  { "name": "<product name>", "code": "<product code e.g. F11.000>", "type": "<unit/type e.g. BU>", "grade": "<e.g. 4F+>", "size": "<e.g. 40cm>", "qty": "<quantity>" }
+
+Read numbers/codes exactly (keep decimals like 1.26, codes like VC11.2). Labels are dense — look carefully and do not drop fields, but ALWAYS map them onto the fixed keys above.
+
+BOX CODE (important): Each cardboard box has a large code PRINTED ON THE CARTON itself (not on the paper label), in the form "VCx" — e.g. VC9, VC11.2, VC7.5, VC4.2. This is the box type. ALWAYS record it in "box_code" with the exact value printed on the cardboard. The small paper label may also show "line_code" (often the same code with a "-B" suffix, e.g. VC9-B); record line_code too if visible, but box_code is the authoritative box type and must be filled whenever the carton code is legible.
 
 OUTPUT: Return your final answer as raw JSON on the LAST line, exactly:
-{ "box_count": <int>, "labels": [ { "fields": { "<k>": "<v>" } } ] }
+{ "box_count": <int>, "labels": [ { "fields": { "shop_name": "...", "order_number": "...", "products": [ { "name": "...", "code": "...", "qty": "..." } ], ... } } ] }
 box_count MUST equal labels.length.`;
 
 // Re-examination prompt for a column that looks under-counted. We give the model a target

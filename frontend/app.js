@@ -238,16 +238,36 @@ async function pollJob(job) {
 
 // ---- Export helpers ----
 function labelsToRows(result) {
-  // flatten labels -> array of objects with union of keys
+  // Flatten labels to rows. The "products" array is expanded into fixed columns
+  // (product_1_name, product_1_code, ... ) so the table stays consistent across labels.
   const labels = (result && result.labels) || [];
-  const keys = new Set();
+  const PROD_SUB = ["name", "code", "type", "grade", "size", "qty"];
+
+  const scalarKeys = new Set();
+  let maxProducts = 0;
   for (const l of labels) {
-    Object.keys(l.fields || {}).forEach(k => keys.add(k));
+    const f = l.fields || {};
+    for (const k of Object.keys(f)) {
+      if (k === "products") { maxProducts = Math.max(maxProducts, Array.isArray(f.products) ? f.products.length : 0); }
+      else scalarKeys.add(k);
+    }
   }
-  const cols = ["index", ...Array.from(keys)];
+  const prodCols = [];
+  for (let i = 1; i <= maxProducts; i++) for (const s of PROD_SUB) prodCols.push(`product_${i}_${s}`);
+
+  const cols = ["index", ...Array.from(scalarKeys), ...prodCols];
   const rows = labels.map(l => {
+    const f = l.fields || {};
     const row = { index: l.index };
-    for (const k of keys) row[k] = (l.fields && l.fields[k] != null) ? l.fields[k] : "";
+    for (const k of scalarKeys) {
+      const v = f[k];
+      row[k] = (v != null && typeof v !== "object") ? v : "";
+    }
+    const prods = Array.isArray(f.products) ? f.products : [];
+    for (let i = 0; i < maxProducts; i++) {
+      const p = prods[i] || {};
+      for (const s of PROD_SUB) row[`product_${i + 1}_${s}`] = (p[s] != null ? p[s] : "");
+    }
     return row;
   });
   return { cols, rows };
