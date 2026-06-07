@@ -504,7 +504,11 @@ export const handler = async (event) => {
     const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
     const buffer = await streamToBuffer(obj.Body);
 
+    const phases = {};
+    const mark = (() => { let last = Date.now(); return (k) => { const n = Date.now(); phases[k] = n - last; last = n; }; })();
+
     const { tiles, ocrTiles, cols, rows, cutSource, oriented, xEdges, W, H } = await buildTiles(buffer);
+    mark("buildTiles");
 
     // OCR each column at NATIVE resolution with Textract (per-column native crops read small
     // print far better than one downscaled full image). Detect intact-label regions on the same
@@ -516,6 +520,7 @@ export const handler = async (event) => {
       ocrGeomPerTile[idx] = kept;         // keep geometry for deterministic backfill (index-aligned)
       return sortLines(kept);
     }));
+    mark("ocrColumns");
 
     // ENSEMBLE + per-column hole cross-check: fire every tile × every vote in parallel,
     // and detect holes on each column tile (reference signal, per column).
@@ -527,6 +532,7 @@ export const handler = async (event) => {
       Promise.all(tileVotePromises.map(votes => Promise.allSettled(votes))),
       Promise.all(tiles.map(t => countHoles(t))),
     ]);
+    mark("countEnsemble");
 
     // Per column: majority-vote the count, keep that column's best labels.
     const colLabels = [];   // colLabels[i] = labels array for column i
@@ -587,6 +593,7 @@ export const handler = async (event) => {
 
     // DETERMINISTIC BACKFILL: fill order_number / time / total left blank by the model,
     // using the Textract geometry we already have for each column (no extra model calls).
+    mark("reexam");
     for (let i = 0; i < colLabels.length; i++) {
       try { backfillColumn(colLabels[i], ocrGeomPerTile[i]); } catch (_) { /* never break */ }
     }
@@ -614,6 +621,7 @@ export const handler = async (event) => {
       if (parsed) { mergeBestFields(merged, [parsed]); consolidated = true; }
       try { reconcileFields(merged); } catch (_) {}
     } catch (_) { /* keep pre-consolidation labels on failure */ }
+    mark("consolidate");
 
     // PER-LABEL PRODUCT OCR: for boxes still missing products, crop that label's band at NATIVE
     // resolution and OCR it ALONE — so product-code tokens cannot bleed in from neighbouring
@@ -621,6 +629,7 @@ export const handler = async (event) => {
     try {
       await fillProductsPerLabel(merged, { oriented, xEdges, W, H, cols, colLabels, ocrGeomPerTile });
     } catch (_) { /* never break */ }
+    mark("perLabelProducts");
 
     // FALLBACK product backfill from the column OCR we already have (covers anything the
     // per-label pass could not crop), building rows from product-code tokens by band.
@@ -680,6 +689,7 @@ export const handler = async (event) => {
       model: MODEL_ID,
       usage,
       processingMs: Date.now() - startedAt,
+      phases,
       finishedAt: new Date().toISOString(),
     });
   } catch (err) {

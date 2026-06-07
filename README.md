@@ -161,6 +161,7 @@ Sau khi chốt số thùng, có 3 pha bồi trường — KHÔNG pha nào đư�
 | number | 98.9% | |
 | order_number | 86.2% | thấp ở kho SG — OCR xác nhận nhiều nhãn vốn không in / quá mờ (z505382 chỉ 9/45 có token "TO-") |
 | total | 85.9% | nhiều ảnh nhãn không in total (loại n/a khỏi mẫu số) |
+| products | 31/31 trên IMG_5816 | per-label OCR vớt nốt nhãn model bỏ sót |
 | **OVERALL** | **95.7%** | |
 
 KPI quan trọng: KHÔNG tính một trường lên ảnh mà loại nhãn của ảnh đó không in trường ấy
@@ -197,6 +198,52 @@ cho khâu detect. Chi tiết + benchmark đầy đủ: [`pyapp/README.md`](pyapp
 cd app/deploy
 ./redeploy.ps1
 ```
+
+## Thời gian theo phase (đo thật, IMG_5816, 31 thùng)
+
+| Phase | Thời gian | Chạy song song? |
+|-------|----------:|----------------|
+| buildTiles (orient + cắt cột theo lỗ + tiền xử lý) | ~4s | — |
+| ocrColumns (Textract 3 cột) | ~6s | có (3 cột) |
+| **countEnsemble (đếm + extended thinking + VOTES vote)** | **~144s** | có (mọi cột × mọi vote fire cùng lúc) |
+| reexam (chỉ khi cột thiếu) | 0–30s | có |
+| consolidate (Claude sửa/điền field theo pattern) | ~45s | 1 lời gọi |
+| perLabelProducts (OCR từng nhãn còn thiếu products) | **~5s** | **có (Promise.all toàn bộ crop)** |
+| **Tổng** | **~200–280s/ảnh** | |
+
+Nút thắt là **countEnsemble (~70%)** — đếm thùng với thinking + ensemble vote. Per-label
+product OCR chạy SONG SONG nên chỉ ~5s, không phải nguyên nhân chậm. Nhiều ảnh xử lý song
+song (mỗi ảnh 1 invoke độc lập), nên wall-clock 12 ảnh ≈ thời gian 1 ảnh chậm nhất.
+
+## Lịch sử cập nhật (revisions)
+
+### r13 — Per-label product OCR (đầy đủ products)
+- **Tính năng:** với nhãn còn thiếu `products`, cắt riêng băng nhãn đó (định vị bằng Y của
+  order_number) ở độ phân giải gốc và **Textract OCR từng nhãn ĐỘC LẬP** → product-code không
+  bị lẫn từ nhãn liền kề (lỗi của cách gán theo cột). Lọc bỏ dòng header/shop. Tất cả crop
+  chạy `Promise.all` song song.
+- **Performance:** products IMG_5816 **27→31/31**; phase này chỉ +~5s.
+
+### r12 — Backfill products theo anchor + tên sản phẩm
+- Gán product rows theo Y của order_number (đầu nhãn) thay vì băng đều; bắt thêm `name`.
+
+### r11–r9 — Consolidation + product backfill
+- Pha **Claude consolidate** (1 lời gọi text-only): đưa toàn bộ nhãn + OCR cho Claude sửa/điền
+  theo pattern lô, **khóa số đếm**. Backfill products deterministic từ OCR code tokens.
+
+### r8–r6 — Backfill theo thứ tự + reconcile + suy line_code
+- Backfill order/time/total: gán token OCR theo THỨ TỰ khi số token = số thùng (chính xác hơn
+  băng đều) + dedup cùng hàng.
+- **Reconcile chéo nhãn:** cùng shop_name → cùng order_number / box_code / destination (consensus
+  lô); suy `line_code = box_code + hậu tố`. → line_code 100%, order/destination tăng mạnh.
+
+### r5 — KPI applicability-aware
+- Không tính một trường lên ảnh mà LOẠI nhãn của ảnh đó không in trường ấy (nhãn VC35 xuất khẩu
+  không có order/total). KPI thật: box_code/line_code 100%, shop 99.7%, number 98.9%, tổng ~95%.
+
+### r1–r4 — Pipeline đếm
+- Tiling theo lỗ tròn + extended thinking + ensemble vote + Textract OCR hybrid. Đếm 11/12 đúng,
+  tổng sai số 1.
 
 ## Ghi chú về model
 - Yêu cầu ban đầu là **Claude Opus 4.8** nhưng account `307711587176` chưa duyệt agreement
