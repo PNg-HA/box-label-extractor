@@ -154,3 +154,41 @@ export function backfillProducts(labelsInCol, geomLines) {
     if (perBox[k].length) lbl.fields.products = perBox[k];
   }
 }
+
+// Parse product rows from the OCR lines of ONE isolated label crop (no neighbour bleed).
+// Each line with a product code becomes a row { name?, code, grade?, type?, size?, qty? }.
+export function parseProductsFromLines(lines) {
+  const rows = [];
+  for (const t of lines) {
+    const code = (t.match(RE_PCODE) || [])[1];
+    const hasName = /[A-Za-z]{3,}/.test(t.replace(RE_PCODE, ""));
+    if (!code && !hasName) continue;
+    // skip header/footer lines that are not products
+    if (/\b(TOTAL|QTT|QTY|TO[-\s.]|VC\d|D\d{5})\b/i.test(t) && !code) continue;
+    // skip the label header rows: shop/branch names and address fragments (no product code)
+    if (!code && /\b(RETAIL|DAD|ARE|DC|HA NOI|TRUNG HOA|XA DAN|LAC LONG|THANH CONG|LONG BIEN|RETAI|HN\s*-)\b/i.test(t)) continue;
+    if (!code && /^[.\s]*[A-Z][A-Z .\-]{4,}$/.test(t) && !/\d/.test(t)) continue;  // ALL-CAPS header line
+    const row = {};
+    const name = t.split(RE_PCODE)[0].replace(/[._\-]+$/, "").trim();
+    if (name && /[A-Za-z]/.test(name) && name.length >= 3) row.name = name;
+    if (code) row.code = code.toUpperCase().replace(/\s+/g, "");
+    const sz = (t.match(RE_SIZE) || [])[1]; if (sz) row.size = sz.replace(/\s+/g, "");
+    const gr = (t.match(RE_GRADE) || [])[1]; if (gr) row.grade = gr.toUpperCase().replace(/\s+/g, "");
+    const ty = (t.match(RE_TYPE) || [])[1]; if (ty) row.type = ty.toUpperCase();
+    const qm = t.match(/\b(\d{1,4})\s*$/); if (qm) row.qty = qm[1];
+    if (row.name || row.code) rows.push(row);
+  }
+  return rows;
+}
+
+// Compute label anchor Y positions (normalized) for a column from order-number OCR lines.
+export function labelAnchors(geomLines, n) {
+  const sorted = (geomLines || []).slice().sort((a, b) => a.top - b.top);
+  const gap = 0.5 / Math.max(1, n);
+  const anch = [];
+  for (const ln of sorted) {
+    if (!cleanOrder(ln.text)) continue;
+    if (!anch.length || ln.top - anch[anch.length - 1] > gap) anch.push(ln.top);
+  }
+  return anch;
+}

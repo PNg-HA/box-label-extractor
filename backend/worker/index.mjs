@@ -2,9 +2,9 @@ import { BedrockRuntimeClient, ConverseStreamCommand } from "@aws-sdk/client-bed
 import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import sharp from "sharp";
 import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
-import { ocrLinesWithGeom, sortLines } from "./textract.mjs";
+import { ocrLinesWithGeom, sortLines, ocrLines } from "./textract.mjs";
 import { intactLabelRegions, dropTornLines } from "./labelshape.mjs";
-import { backfillColumn, backfillProducts } from "./backfill.mjs";
+import { backfillColumn, backfillProducts, parseProductsFromLines, labelAnchors } from "./backfill.mjs";
 import { reconcileFields } from "./reconcile.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
@@ -190,7 +190,7 @@ async function buildTiles(buffer) {
       ocrTiles.push(await makeOcrColumn(oriented, left, top, w, h));
     }
   }
-  return { tiles, ocrTiles, cols, rows, cutSource };
+  return { tiles, ocrTiles, cols, rows, cutSource, oriented, xEdges, W, H };
 }
 
 // OCR crop for ONE column at NATIVE resolution. Measured to read the most small-print lines
@@ -406,6 +406,46 @@ function modeWithTieHigh(nums) {
   return best;
 }
 
+// PER-LABEL PRODUCT OCR. For every box that still has no products, crop just that label's
+// vertical band within its column at native resolution and OCR it on its own, so product
+// tokens cannot bleed in from the labels above/below. All crops run in parallel.
+async function fillProductsPerLabel(merged, ctx) {
+  const { oriented, xEdges, H, colLabels, ocrGeomPerTile } = ctx;
+  const jobs = [];   // { label, left, top, w, h }
+  for (let ci = 0; ci < colLabels.length; ci++) {
+    const labels = merged.filter(l => l._col === ci);
+    const n = labels.length;
+    if (!n) continue;
+    const left = xEdges[ci] ?? 0;
+    const w = (xEdges[ci + 1] ?? ctx.W) - left;
+    // anchor each label's top from order-number OCR; fall back to even bands
+    let anch = labelAnchors(ocrGeomPerTile[ci], n);
+    if (anch.length !== n) anch = Array.from({ length: n }, (_, k) => k / n);
+    for (let k = 0; k < n; k++) {
+      const lbl = labels[k];
+      const cur = lbl.fields?.products;
+      if (Array.isArray(cur) && cur.length > 0) continue;     // already has products
+      // band [anch[k], anch[k+1]) padded a little; clamp to image
+      const yTop = Math.max(0, anch[k] - 0.01);
+      const yBot = Math.min(1, (k + 1 < n ? anch[k + 1] : 1) + 0.01);
+      const top = Math.round(yTop * H);
+      const h = Math.max(1, Math.round((yBot - yTop) * H));
+      jobs.push({ lbl, left, top, w, h });
+    }
+  }
+  if (!jobs.length) return;
+
+  await Promise.all(jobs.map(async (j) => {
+    try {
+      const crop = await sharp(oriented).extract({ left: j.left, top: j.top, width: j.w, height: j.h })
+        .jpeg({ quality: 92 }).toBuffer();
+      const lines = await ocrLines(crop);              // Textract on the isolated label
+      const products = parseProductsFromLines(lines);
+      if (products.length) j.lbl.fields.products = products;
+    } catch (_) { /* skip this label */ }
+  }));
+}
+
 // pick the labels from the run that matches `count` and has the most filled fields
 function pickLabels(runs, count) {
   const matching = runs.filter(r => r.count === count);
@@ -464,7 +504,7 @@ export const handler = async (event) => {
     const obj = await s3.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
     const buffer = await streamToBuffer(obj.Body);
 
-    const { tiles, ocrTiles, cols, rows, cutSource } = await buildTiles(buffer);
+    const { tiles, ocrTiles, cols, rows, cutSource, oriented, xEdges, W, H } = await buildTiles(buffer);
 
     // OCR each column at NATIVE resolution with Textract (per-column native crops read small
     // print far better than one downscaled full image). Detect intact-label regions on the same
@@ -575,9 +615,15 @@ export const handler = async (event) => {
       try { reconcileFields(merged); } catch (_) {}
     } catch (_) { /* keep pre-consolidation labels on failure */ }
 
-    // PRODUCT BACKFILL: if a box still has no products but the OCR shows product-code tokens
-    // (F11.000, T14.057, ...) in that box's band, create minimal product rows from them so a
-    // real product label is never left empty (deterministic, no model call).
+    // PER-LABEL PRODUCT OCR: for boxes still missing products, crop that label's band at NATIVE
+    // resolution and OCR it ALONE — so product-code tokens cannot bleed in from neighbouring
+    // labels (the failure mode of column-wide band assignment). Parse products from that crop.
+    try {
+      await fillProductsPerLabel(merged, { oriented, xEdges, W, H, cols, colLabels, ocrGeomPerTile });
+    } catch (_) { /* never break */ }
+
+    // FALLBACK product backfill from the column OCR we already have (covers anything the
+    // per-label pass could not crop), building rows from product-code tokens by band.
     for (let ci = 0; ci < colLabels.length; ci++) {
       const colMerged = merged.filter(l => l._col === ci);
       try { backfillProducts(colMerged, ocrGeomPerTile[ci]); } catch (_) {}
