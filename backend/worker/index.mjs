@@ -11,10 +11,10 @@ const REGION = process.env.AWS_REGION || "ap-southeast-1";
 const BEDROCK_REGION = process.env.BEDROCK_REGION || REGION;
 const MODEL_ID = process.env.MODEL_ID || "global.anthropic.claude-sonnet-4-6";
 const BUCKET = process.env.STORAGE_BUCKET;
-const THINKING_BUDGET = parseInt(process.env.THINKING_BUDGET || "64000", 10);
+const THINKING_BUDGET = parseInt(process.env.THINKING_BUDGET || "10000", 10);
 const MAX_TOKENS = parseInt(process.env.MAX_TOKENS || "96000", 10);
 const TILE_TARGET_PX = parseInt(process.env.TILE_TARGET_PX || "1500", 10);
-const VOTES = parseInt(process.env.VOTES || "3", 10);   // ensemble runs per column (all parallel)
+const VOTES = parseInt(process.env.VOTES || "2", 10);   // ensemble runs per column (all parallel)
 // Cross-check tolerance: flag low confidence when |model - holes| / model exceeds this.
 const CROSSCHECK_TOL = parseFloat(process.env.CROSSCHECK_TOL || "0.2");
 

@@ -174,8 +174,22 @@ KPI quan trọng: KHÔNG tính một trường lên ảnh mà loại nhãn của
 UI hiện badge ⚠ khi lowConfidence.
 
 Tham số env của `gapv-label-worker`:
-`MODEL_ID`, `THINKING_BUDGET` (16000), `MAX_TOKENS` (48000), `TILE_TARGET_PX` (1500),
-`VOTES` (3), `CROSSCHECK_TOL` (0.2).
+`MODEL_ID`, `THINKING_BUDGET` (10000), `MAX_TOKENS` (48000), `TILE_TARGET_PX` (1500),
+`VOTES` (2), `CROSSCHECK_TOL` (0.2).
+
+### Tinh chỉnh tốc độ ↔ chính xác (đo thật, IMG_5816, 3 lần/cấu hình)
+
+| THINKING_BUDGET | VOTES | count đúng | avg giây | order/products |
+|----------------:|------:|:--:|--:|--:|
+| 16000 | 3 | — | ~204s | 31/31 |
+| 12000 | 3 | 3/3 | 228s (dao động 166–267) | 31/31 |
+| 8000 | 3 | 2/3 | 136s | 30.7/30.7 |
+| **10000** | **2** | **3/3** | **135s (122–148)** | **31/31** |
+
+Chốt **THINKING_BUDGET=10000 + VOTES=2**: dưới 3 phút, count ổn định 3/3, field đầy đủ như cũ.
+Giảm VOTES 3→2 giúp giảm tải song song (ít throttle) nên vừa nhanh vừa ổn định hơn là chỉ hạ
+budget. `time` trần ~27/31 ở mọi cấu hình là giới hạn dữ liệu (vài nhãn không in giờ), không
+phải do budget. Ảnh dày 45 thùng: count 44–45 (±1), ~80s.
 
 ## Phương án thay thế: Python + OpenCV (`pyapp`)
 
@@ -199,23 +213,28 @@ cd app/deploy
 ./redeploy.ps1
 ```
 
-## Thời gian theo phase (đo thật, IMG_5816, 31 thùng)
+## Thời gian theo phase (đo thật, IMG_5816, 31 thùng, cấu hình budget=10000/VOTES=2)
 
 | Phase | Thời gian | Chạy song song? |
 |-------|----------:|----------------|
 | buildTiles (orient + cắt cột theo lỗ + tiền xử lý) | ~4s | — |
 | ocrColumns (Textract 3 cột) | ~6s | có (3 cột) |
-| **countEnsemble (đếm + extended thinking + VOTES vote)** | **~144s** | có (mọi cột × mọi vote fire cùng lúc) |
+| **countEnsemble (đếm + extended thinking + VOTES vote)** | **~75–90s** | có (mọi cột × mọi vote fire cùng lúc) |
 | reexam (chỉ khi cột thiếu) | 0–30s | có |
-| consolidate (Claude sửa/điền field theo pattern) | ~45s | 1 lời gọi |
+| consolidate (Claude sửa/điền field theo pattern) | ~40s | 1 lời gọi |
 | perLabelProducts (OCR từng nhãn còn thiếu products) | **~5s** | **có (Promise.all toàn bộ crop)** |
-| **Tổng** | **~200–280s/ảnh** | |
+| **Tổng** | **~120–150s/ảnh (<3 phút)** | |
 
-Nút thắt là **countEnsemble (~70%)** — đếm thùng với thinking + ensemble vote. Per-label
-product OCR chạy SONG SONG nên chỉ ~5s, không phải nguyên nhân chậm. Nhiều ảnh xử lý song
-song (mỗi ảnh 1 invoke độc lập), nên wall-clock 12 ảnh ≈ thời gian 1 ảnh chậm nhất.
+Nút thắt là **countEnsemble** — đếm thùng với thinking + ensemble vote. Per-label product OCR
+chạy SONG SONG nên chỉ ~5s, không phải nguyên nhân chậm. Nhiều ảnh xử lý song song (mỗi ảnh 1
+invoke độc lập), nên wall-clock 12 ảnh ≈ thời gian 1 ảnh chậm nhất.
 
 ## Lịch sử cập nhật (revisions)
+
+### r14 — Tinh chỉnh tốc độ: budget 10000 + VOTES 2
+- Hạ THINKING_BUDGET 16000→10000 và VOTES 3→2 sau khi đo trade-off 3 lần/cấu hình.
+- **Kết quả:** ~204s → **~135s (<3 phút)**, count vẫn 3/3 đúng, field đầy đủ như cũ. Giảm
+  VOTES giúp giảm throttle song song nên ổn định hơn là chỉ hạ budget.
 
 ### r13 — Per-label product OCR (đầy đủ products)
 - **Tính năng:** với nhãn còn thiếu `products`, cắt riêng băng nhãn đó (định vị bằng Y của
