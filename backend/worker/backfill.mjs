@@ -110,27 +110,47 @@ const RE_TYPE = /\b(MI|BU|MO)\b/;
 export function backfillProducts(labelsInCol, geomLines) {
   const n = labelsInCol.length;
   if (!n || !geomLines || !geomLines.length) return;
-  const bandOf = (top) => Math.min(n - 1, Math.max(0, Math.floor(top * n)));
 
-  // group product-code tokens per band
-  const perBand = Array.from({ length: n }, () => []);
-  for (const ln of geomLines) {
+  const sorted = geomLines.slice().sort((a, b) => a.top - b.top);
+
+  // Anchor each box by the Y of its order_number ("TO-...") line — that line sits at the TOP
+  // of every label. Box k then spans [anchor[k], anchor[k+1]); product codes in that range
+  // belong to box k. This is far more accurate than even Y-bands (labels are not equal height).
+  const anchors = [];
+  for (const ln of sorted) if (cleanOrder(ln.text)) anchors.push(ln.top);
+  // dedup anchors on the same row
+  const gap = 0.5 / n;
+  const anch = [];
+  for (const a of anchors) if (!anch.length || a - anch[anch.length - 1] > gap) anch.push(a);
+
+  const boxOf = (top) => {
+    if (anch.length === n) {
+      // last anchor's box extends to bottom
+      for (let k = n - 1; k >= 0; k--) if (top >= anch[k] - gap) return k;
+      return 0;
+    }
+    return Math.min(n - 1, Math.max(0, Math.floor(top * n)));   // fallback: even bands
+  };
+
+  const perBox = Array.from({ length: n }, () => []);
+  for (const ln of sorted) {
     const code = (ln.text.match(RE_PCODE) || [])[1];
     if (!code) continue;
-    const b = bandOf(ln.top);
     const row = { code: code.toUpperCase().replace(/\s+/g, "") };
     const sz = (ln.text.match(RE_SIZE) || [])[1]; if (sz) row.size = sz.replace(/\s+/g, "");
     const gr = (ln.text.match(RE_GRADE) || [])[1]; if (gr) row.grade = gr.toUpperCase().replace(/\s+/g, "");
     const ty = (ln.text.match(RE_TYPE) || [])[1]; if (ty) row.type = ty.toUpperCase();
-    perBand[b].push(row);
+    // product name = the leading words before the code/size/grade tokens (e.g. "Roselily Aisha")
+    const name = ln.text.split(RE_PCODE)[0].replace(/[._-]+$/, "").trim();
+    if (name && /[A-Za-z]/.test(name) && name.length >= 3) row.name = name;
+    perBox[boxOf(ln.top)].push(row);
   }
 
   for (let k = 0; k < n; k++) {
     const lbl = labelsInCol[k];
     if (!lbl?.fields) continue;
     const cur = lbl.fields.products;
-    const hasProducts = Array.isArray(cur) && cur.length > 0;
-    if (hasProducts) continue;
-    if (perBand[k].length) lbl.fields.products = perBand[k];
+    if (Array.isArray(cur) && cur.length > 0) continue;   // never override extracted products
+    if (perBox[k].length) lbl.fields.products = perBox[k];
   }
 }
