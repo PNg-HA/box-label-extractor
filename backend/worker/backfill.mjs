@@ -39,36 +39,55 @@ export function backfillColumn(labelsInCol, geomLines) {
   const n = labelsInCol.length;
   if (!n || !geomLines || !geomLines.length) return;
 
-  // band edges in normalized Y; band b = [b/n, (b+1)/n)
-  const bandOf = (top) => Math.min(n - 1, Math.max(0, Math.floor(top * n)));
-
-  // collect typed tokens with their band
-  const orders = [], times = [], totals = [];
   const sorted = geomLines.slice().sort((a, b) => a.top - b.top);
+
+  // collect typed tokens (each with its Y), top-to-bottom
+  const orders = [], times = [], totals = [];
   for (let i = 0; i < sorted.length; i++) {
     const ln = sorted[i];
-    const band = bandOf(ln.top);
     const ord = cleanOrder(ln.text);
-    if (ord) orders.push({ band, val: ord });
+    if (ord) orders.push({ top: ln.top, val: ord });
     const tm = cleanTime(ln.text);
-    if (tm) times.push({ band, val: tm });
+    if (tm) times.push({ top: ln.top, val: tm });
     if (RE_TOTAL_KW.test(ln.text)) {
-      // number is usually on the same line after the keyword, or the next line
       let num = (ln.text.replace(RE_TOTAL_KW, "").match(RE_INT) || [])[0];
       if (!num && sorted[i + 1]) num = (sorted[i + 1].text.match(RE_INT) || [])[0];
-      if (num) totals.push({ band, val: num });
+      if (num) totals.push({ top: ln.top, val: num });
     }
   }
 
-  const fillByBand = (arr, key) => {
-    for (const { band, val } of arr) {
-      const lbl = labelsInCol[band];
-      if (lbl && lbl.fields && !String(lbl.fields[key] ?? "").trim()) {
-        lbl.fields[key] = val;
+  // Merge tokens that sit on essentially the same row (within ~1/(2n) of height): OCR often
+  // splits one label's value across lines, which would otherwise look like extra rows.
+  const dedup = (arr) => {
+    const out = [];
+    const gap = 0.5 / n;
+    for (const t of arr) {
+      if (out.length && Math.abs(t.top - out[out.length - 1].top) < gap) continue;
+      out.push(t);
+    }
+    return out;
+  };
+
+  // Assign tokens to labels. If the number of (deduped) tokens equals the box count, the
+  // k-th token belongs to the k-th label (each label carries exactly one) — the most reliable
+  // mapping. Otherwise fall back to band-by-Y so we still fill what we can.
+  const assign = (arr, key) => {
+    const toks = dedup(arr);
+    if (!toks.length) return;
+    if (toks.length === n) {
+      for (let k = 0; k < n; k++) {
+        const lbl = labelsInCol[k];
+        if (lbl?.fields && !String(lbl.fields[key] ?? "").trim()) lbl.fields[key] = toks[k].val;
       }
+      return;
+    }
+    for (const t of toks) {
+      const band = Math.min(n - 1, Math.max(0, Math.floor(t.top * n)));
+      const lbl = labelsInCol[band];
+      if (lbl?.fields && !String(lbl.fields[key] ?? "").trim()) lbl.fields[key] = t.val;
     }
   };
-  fillByBand(orders, "order_number");
-  fillByBand(times, "time");
-  fillByBand(totals, "total");
+  assign(orders, "order_number");
+  assign(times, "time");
+  assign(totals, "total");
 }

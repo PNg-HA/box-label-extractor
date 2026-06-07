@@ -53,6 +53,8 @@ export function reconcileFields(labels) {
   const orderToShop = consensusMap(labels, "order_number", "shop_name");
   // shop_name -> box_code (carton type is stable per shop within a batch)
   const shopToBox = consensusMap(labels, "shop_name", "box_code");
+  // shop_name -> destination (a branch's full address is the same across the batch)
+  const shopToDest = consensusMap(labels, "shop_name", "destination");
 
   // Detect the batch's line_code suffix pattern: line_code is usually box_code + a suffix
   // (e.g. "VC9" -> "VC9-B"). Learn the dominant suffix from labels that have BOTH, then we can
@@ -89,6 +91,9 @@ export function reconcileFields(labels) {
     }
     if (!String(f.box_code ?? "").trim() && shop && shopToBox.has(shop)) {
       f.box_code = shopToBox.get(shop); filled++;
+    }
+    if (!String(f.destination ?? "").trim() && shop && shopToDest.has(shop)) {
+      f.destination = shopToDest.get(shop); filled++;
     }
     // fill blank line_code from box_code using the learned batch suffix
     if (suffix != null && !String(f.line_code ?? "").trim()) {
