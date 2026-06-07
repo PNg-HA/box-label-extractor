@@ -91,3 +91,46 @@ export function backfillColumn(labelsInCol, geomLines) {
   assign(times, "time");
   assign(totals, "total");
 }
+
+// Product-code token: F11.000 / F10-008 / T14.057 / F29 / 001 ... and size/grade hints.
+const RE_PCODE = /\b([FT]\d{1,2}[.\-]?\d{0,3})\b/;
+const RE_SIZE = /\b(\d{2,3}\s*cm)\b/i;
+const RE_GRADE = /\b(\d?F[+\-]|Grade\s*[A-Z0-9]+|[24]F[+\-])\b/i;
+const RE_TYPE = /\b(MI|BU|MO)\b/;
+
+/**
+ * For boxes that still have an EMPTY products array, build minimal product rows from the
+ * product-code tokens that fall within that box's vertical band of the column's OCR. This
+ * guarantees a genuine product label is not left blank. Deterministic, no model call.
+ * Only fills boxes whose products are missing/empty — never overrides extracted products.
+ *
+ * @param labelsInCol labels (top-to-bottom) for ONE column, each { fields }
+ * @param geomLines   column OCR geometry { text, top, ... }
+ */
+export function backfillProducts(labelsInCol, geomLines) {
+  const n = labelsInCol.length;
+  if (!n || !geomLines || !geomLines.length) return;
+  const bandOf = (top) => Math.min(n - 1, Math.max(0, Math.floor(top * n)));
+
+  // group product-code tokens per band
+  const perBand = Array.from({ length: n }, () => []);
+  for (const ln of geomLines) {
+    const code = (ln.text.match(RE_PCODE) || [])[1];
+    if (!code) continue;
+    const b = bandOf(ln.top);
+    const row = { code: code.toUpperCase().replace(/\s+/g, "") };
+    const sz = (ln.text.match(RE_SIZE) || [])[1]; if (sz) row.size = sz.replace(/\s+/g, "");
+    const gr = (ln.text.match(RE_GRADE) || [])[1]; if (gr) row.grade = gr.toUpperCase().replace(/\s+/g, "");
+    const ty = (ln.text.match(RE_TYPE) || [])[1]; if (ty) row.type = ty.toUpperCase();
+    perBand[b].push(row);
+  }
+
+  for (let k = 0; k < n; k++) {
+    const lbl = labelsInCol[k];
+    if (!lbl?.fields) continue;
+    const cur = lbl.fields.products;
+    const hasProducts = Array.isArray(cur) && cur.length > 0;
+    if (hasProducts) continue;
+    if (perBand[k].length) lbl.fields.products = perBand[k];
+  }
+}

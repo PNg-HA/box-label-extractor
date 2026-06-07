@@ -4,7 +4,7 @@ import sharp from "sharp";
 import { countHoles, detectHoles, columnCutsFromHoles } from "./holes.mjs";
 import { ocrLinesWithGeom, sortLines } from "./textract.mjs";
 import { intactLabelRegions, dropTornLines } from "./labelshape.mjs";
-import { backfillColumn } from "./backfill.mjs";
+import { backfillColumn, backfillProducts } from "./backfill.mjs";
 import { reconcileFields } from "./reconcile.mjs";
 
 const REGION = process.env.AWS_REGION || "ap-southeast-1";
@@ -337,6 +337,7 @@ const CONSOLIDATE_PROMPT = `You are correcting structured data extracted from ON
 - These are PRE-PRINTED forms: if most boxes show time / total, the rest likely do too — fill from OCR at that position when present.
 - box_code is the big code on the carton (VC9, VC11.2 ...); line_code is the label code (often "-B").
 - A value with a comma is "destination" (full address); without a comma it is "shop_name".
+- PRODUCTS: every box's label lists one or more product rows in a small table. Extract ALL of them into "products" as objects { name, code, type, grade, size, qty }. The product CODE looks like "F11.000", "F10.008", "T14.057", "F29", "F45", "001" (a letter+number, sometimes a leading-zero variant). grade looks like "4F+", "2F+", "4F-", "Grade A"; type like "MI", "BU", "MO"; size like "50cm","60cm","70cm","40cm"; qty is the small per-row quantity. The per-row quantities usually SUM to "total". Read the OCR product/code/size tokens for that box's region and DO NOT leave products empty when the OCR shows product rows for that box.
 - ONLY fill a field if the OCR or a strong batch pattern supports it. NEVER invent a value with no evidence. Keep values the current data already has unless the OCR clearly shows they are wrong.
 
 HARD RULES:
@@ -355,16 +356,46 @@ FULL OCR PER COLUMN:
 ${ocr}`;
 }
 
-// Apply consolidation result: only overwrite fields, keep count/order from `merged`.
-function applyConsolidation(merged, text) {
+// Parse one consolidation result into a labels array, or null if it changed the box count.
+function parseConsolidation(text, expectedLen) {
   const data = extractJson(text);
   const out = Array.isArray(data.labels) ? data.labels : null;
-  if (!out || out.length !== merged.length) return false;   // reject if count changed
-  for (let i = 0; i < merged.length; i++) {
-    const nf = out[i]?.fields;
-    if (nf && typeof nf === "object") merged[i].fields = nf;
+  if (!out || out.length !== expectedLen) return null;
+  return out.map(l => (l && typeof l.fields === "object" && l.fields) ? l.fields : {});
+}
+
+// Score how "complete" a field set is: count non-empty scalar fields + weight products by
+// how many product rows and how many sub-cells they fill (richer products win).
+function fieldScore(f) {
+  if (!f || typeof f !== "object") return -1;
+  let s = 0;
+  for (const [k, v] of Object.entries(f)) {
+    if (k === "products") continue;
+    if (String(v ?? "").trim()) s += 1;
   }
-  return true;
+  if (Array.isArray(f.products)) {
+    for (const p of f.products) {
+      s += 2;   // each product row is valuable
+      for (const v of Object.values(p || {})) if (String(v ?? "").trim()) s += 0.5;
+    }
+  }
+  return s;
+}
+
+// Merge ensemble candidates into `merged`: per box, pick the candidate field set with the
+// best score (most complete). Never changes count/order. Falls back to current fields if no
+// candidate beats them.
+function mergeBestFields(merged, candidates) {
+  for (let i = 0; i < merged.length; i++) {
+    let best = merged[i].fields || {};
+    let bestScore = fieldScore(best);
+    for (const cand of candidates) {
+      const f = cand[i];
+      const sc = fieldScore(f);
+      if (sc > bestScore) { best = f; bestScore = sc; }
+    }
+    merged[i].fields = best;
+  }
 }
 
 function modeWithTieHigh(nums) {
@@ -520,9 +551,10 @@ export const handler = async (event) => {
       try { backfillColumn(colLabels[i], ocrGeomPerTile[i]); } catch (_) { /* never break */ }
     }
 
-    // assemble final labels
+    // assemble final labels (keep column index for column-aware backfill)
     const merged = [];
-    for (const labels of colLabels) for (const l of labels) merged.push({ fields: l.fields || {} });
+    for (let ci = 0; ci < colLabels.length; ci++)
+      for (const l of colLabels[ci]) merged.push({ fields: l.fields || {}, _col: ci });
     merged.forEach((l, i) => { l.index = i + 1; });
 
     // CROSS-LABEL RECONCILIATION: within this one image, the same shop maps to the same
@@ -530,18 +562,27 @@ export const handler = async (event) => {
     // only, never overrides). This mirrors the human pattern-reasoning across siblings.
     try { reconcileFields(merged); } catch (_) { /* never break */ }
 
-    // CONSOLIDATION (one text-only model call): let Claude correct/fill fields across the whole
-    // batch using full OCR + pattern reasoning. Count is locked — result is rejected if it
-    // changes the number of boxes, so this can only improve field completeness/accuracy.
+    // CONSOLIDATION (one text-only model call): Claude corrects/fills fields across the whole
+    // batch using full OCR + pattern reasoning. Count is locked — rejected if it changes the
+    // box count, so it can only improve field completeness/accuracy.
     let consolidated = false;
     try {
       const { text, usage: cu } = await callModelText(buildConsolidatePrompt(merged, ocrPerTile));
       usage.inputTokens += cu?.inputTokens || 0;
       usage.outputTokens += cu?.outputTokens || 0;
-      consolidated = applyConsolidation(merged, text);
-      // re-run deterministic reconcile to fill any blanks the model still left
+      const parsed = parseConsolidation(text, merged.length);
+      if (parsed) { mergeBestFields(merged, [parsed]); consolidated = true; }
       try { reconcileFields(merged); } catch (_) {}
     } catch (_) { /* keep pre-consolidation labels on failure */ }
+
+    // PRODUCT BACKFILL: if a box still has no products but the OCR shows product-code tokens
+    // (F11.000, T14.057, ...) in that box's band, create minimal product rows from them so a
+    // real product label is never left empty (deterministic, no model call).
+    for (let ci = 0; ci < colLabels.length; ci++) {
+      const colMerged = merged.filter(l => l._col === ci);
+      try { backfillProducts(colMerged, ocrGeomPerTile[ci]); } catch (_) {}
+    }
+    merged.forEach(l => { delete l._col; });
 
     const boxCount = merged.length;
     const holeCount = holesPerCol.reduce((a, h) => a + (h || 0), 0);
